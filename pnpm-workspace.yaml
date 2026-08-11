@@ -1,0 +1,8 @@
+# pnpm 11 reads build-script approvals from here (not from package.json).
+# esbuild (pulled in by Vite) ships a build script; without this, a standalone
+# `pnpm install` exits non-zero asking you to approve it. esbuild works fine
+# regardless (its binary comes from optional platform packages), so we approve
+# it up front. Inside the SDK monorepo this file is ignored — the root
+# pnpm-workspace.yaml governs there.
+allowBuilds:
+  esbuild: true

@@ -1,0 +1,200 @@
+name: Deploy widget to GitHub Pages
+
+# Two channels, one workflow:
+#   - push to main / manual dispatch -> release channel: immutable
+#     /<repo>/v<version>/ + mutable /<repo>/latest/, plus the same build at
+#     the site root (the showcase hub landing page).
+#     Rebuilt only when package.json's version has no v<version> dir yet, so
+#     re-pushing main without a version bump is a no-op deploy.
+#     A repo's first genuine release always resolves to v0.0.1 regardless of
+#     package.json's version, so "Use this template" (whose initial push to
+#     main by GitHub's web-flow bot fires this workflow) publishes a clean
+#     v0.0.1 + /latest/ + root right away, discarding any inherited canary
+#     version. On that same first release, the "Reset repo to a clean
+#     first-release state" step below rewrites package.json's version back to
+#     0.0.1 in the repo itself (so the *next* release bumps to 0.0.2 rather
+#     than the inherited number) and, since "Use this template" never runs
+#     the CLI's own rename step, also personalizes the four placeholder-
+#     identity spots (package.json's name, README.md's heading, index.html's
+#     <title>, App.tsx's title) to match this repo's real name -- a no-op
+#     wherever that placeholder text is already gone.
+#   - push to dev                    -> dev channel: mutable /<repo>/dev/
+#     with version.json + a self-reload snippet, for live review inside Grist.
+#
+# All logic lives in scripts/deploy.mjs (node builtins only).
+#
+# One-time setup this workflow can't do for you: enable Pages (Settings ->
+# Pages -> Source: Deploy from a branch -> gh-pages -> / (root); this workflow
+# creates the gh-pages branch itself if missing, but Pages must be pointed at
+# it once -- NOT main, which serves this repo's raw unbuilt source instead
+# (symptom: a blank page with a 404 for /src/main.tsx in the browser
+# console, even though this workflow reports success) and make sure Actions
+# has write access (Settings -> Actions -> General -> Workflow permissions ->
+# Read and write permissions).
+
+on:
+  push:
+    branches: [main, dev]
+  # Retire the dev URL when the `dev` branch is deleted (see `cleanup` job).
+  delete:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if v<version> already exists."
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+# Serialize deploys onto the single shared gh-pages branch. deploy.mjs
+# additionally rebases-and-retries on push, so interleaving runs never clobber.
+concurrency:
+  group: pages-gh-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # Build/publish on push + manual dispatch. The delete event is handled by `cleanup`.
+    if: github.event_name != 'delete'
+    runs-on: ubuntu-latest
+    env:
+      REPO_NAME: ${{ github.event.repository.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Not --frozen-lockfile, and no `cache: pnpm` above: a freshly
+      # scaffolded repo never has a committed pnpm-lock.yaml (the CLI's
+      # auto-commit runs before anyone's first `pnpm install`), and
+      # --frozen-lockfile/cache: pnpm both hard-require one to exist —
+      # found live, the very first real deploy failed with "Dependencies
+      # lock file is not found". A plain install resolves fresh every run
+      # regardless of whether a lockfile was ever committed.
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Clone gh-pages into ./site
+        run: |
+          git clone --depth 1 --branch gh-pages \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" site \
+            || {
+              echo "gh-pages branch not found; creating an orphan."
+              git clone --depth 1 "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" site
+              git -C site checkout --orphan gh-pages
+              git -C site rm -rf . >/dev/null 2>&1 || true
+              touch site/.nojekyll
+            }
+          git -C site config user.name  "github-actions[bot]"
+          git -C site config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve deploy plan
+        id: plan
+        run: |
+          PLAN=$(node scripts/deploy.mjs plan \
+            --site site --repo "$REPO_NAME" \
+            --event "${{ github.event_name }}" \
+            --ref "${{ github.ref }}" \
+            ${{ github.event.inputs.force == 'true' && '--force' || '' }})
+          echo "Plan: $PLAN"
+          node -e '
+            const p = JSON.parse(process.argv[1]);
+            const fs = require("fs");
+            const out = process.env.GITHUB_OUTPUT;
+            fs.appendFileSync(out, `context=${p.context}\n`);
+            fs.appendFileSync(out, `skip=${p.skip ? "true" : "false"}\n`);
+            fs.appendFileSync(out, `version=${p.version || ""}\n`);
+            fs.appendFileSync(out, `base=${p.base}\n`);
+            fs.appendFileSync(out, `firstRelease=${p.firstRelease ? "true" : "false"}\n`);
+          ' "$PLAN"
+
+      - name: Build
+        if: steps.plan.outputs.skip != 'true'
+        run: |
+          pnpm exec tsc -b
+          pnpm exec vite build --base "${{ steps.plan.outputs.base }}"
+
+      - name: Place build in gh-pages tree
+        if: steps.plan.outputs.skip != 'true'
+        run: |
+          SHA="$(git rev-parse --short HEAD)"
+          VERSION_ARG=""
+          [ -n "${{ steps.plan.outputs.version }}" ] && VERSION_ARG="--version ${{ steps.plan.outputs.version }}"
+          node scripts/deploy.mjs place \
+            --site site --repo "$REPO_NAME" \
+            --channel "${{ steps.plan.outputs.context }}" $VERSION_ARG \
+            --dist dist \
+            --sha "$SHA" --ref "${{ github.ref }}"
+
+      - name: Skip (already published)
+        if: steps.plan.outputs.skip == 'true'
+        run: echo "== skip — v${{ steps.plan.outputs.version }} already published"
+
+      - name: Finalize (versions.json + commit + push)
+        run: |
+          UPDATE_VERSIONS=""
+          if [ "${{ steps.plan.outputs.context }}" = "release" ]; then
+            UPDATE_VERSIONS="--update-versions"
+          fi
+          node scripts/deploy.mjs finalize \
+            --site site --repo "$REPO_NAME" $UPDATE_VERSIONS --push \
+            --commit-message "deploy: ${{ steps.plan.outputs.context }} @ ${{ github.sha }}"
+
+      # On this repo's first genuine release only: reset package.json's version
+      # to 0.0.1 (so the next release bumps to 0.0.2 rather than any inherited
+      # canary version), prune every branch except main/dev/gh-pages, and
+      # reset dev to main's current tip. Establishes the state every widget
+      # should start from regardless of how the repo was created -- a CLI
+      # scaffold already satisfies it trivially; a repo copied via GitHub's
+      # "Use this template" often doesn't (an inherited version, a stray
+      # branch, or dev tracking the source template's own preview history).
+      # Placed after Finalize so it never runs if the release itself failed.
+      # The version-reset commit re-triggers this workflow on main, but that
+      # run sees v0.0.1 already published (firstRelease=false) and no-ops.
+      - name: Reset repo to a clean first-release state
+        if: steps.plan.outputs.context == 'release' && steps.plan.outputs.firstRelease == 'true'
+        run: node scripts/deploy.mjs reset-branches --repo "$REPO_NAME"
+
+  cleanup:
+    # When the `dev` branch is deleted, remove /dev/ so the dev URL retires
+    # (404) instead of serving a stale build forever.
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch' && github.event.ref == 'dev'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (default branch — for scripts/deploy.mjs)
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Clone gh-pages into ./site (skip if it does not exist)
+        id: clone
+        run: |
+          if git clone --depth 1 --branch gh-pages \
+              "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" site; then
+            git -C site config user.name  "github-actions[bot]"
+            git -C site config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gh-pages branch not found; nothing to clean up."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Remove dev dir + push
+        if: steps.clone.outputs.exists == 'true'
+        run: |
+          node scripts/deploy.mjs remove --site site
+          node scripts/deploy.mjs finalize \
+            --site site --push \
+            --commit-message "cleanup: retire dev URL for ${{ github.event.ref }}"
