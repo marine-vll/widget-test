@@ -20,7 +20,7 @@ export const GRIST_OPTIONS: UseGristOptions = {
 }
 
 export const WIDGET_METADATA = {
-  title: "Grist Widget Template",
+  title: "Widget Test",
   description: "Edit the selected row's title and mark it done.",
 } as const
 
