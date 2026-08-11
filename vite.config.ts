@@ -26,6 +26,7 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    setupFiles: ["./src/test/setup.ts"],
     // Most examples/<id>/ don't ship their own WidgetApp.test.tsx yet (it's
     // optional, per docs/planning/2026-08-execution-plan.md §3) --
     // overlayExampleSrc correctly deletes the template's own App.test.tsx
