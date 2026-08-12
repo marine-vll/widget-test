@@ -175,12 +175,14 @@ function encodeMultiValue(
  * string didn't match exactly, or an ISO string) instead of giving up.
  */
 /**
+ * Confirmed live (console diagnostic on the real Grist client): with
  * `grist.onRecords(..., { keepEncoded: false })` -- what this widget uses --
- * hands a Date/DateTime cell over as a moment.js instance on the real Grist
- * client, not a marshalled tuple or a plain epoch number. `decodeGristValue`
- * only recognizes the marshalled/plain-number shapes and silently discards
- * anything else (a moment object matches none of its branches), so that
- * shape has to be caught here, on the *raw* value, before it's lost.
+ * a Date/DateTime cell arrives as an actual native `Date` instance, not a
+ * marshalled tuple or a plain epoch number. `decodeGristValue` has no
+ * "already a Date" branch -- it only recognizes marshalled tuples, plain
+ * numbers/strings/booleans, and arrays -- so a bare `Date` matches none of
+ * its checks and falls through to `return null`, discarding it. That has to
+ * be caught on the *raw* value, before `decodeGristValue` ever sees it.
  */
 function extractMomentLikeDate(value: unknown): Date | null {
   if (
@@ -199,6 +201,10 @@ function decodeDateValue(
   raw: unknown,
   schema: GristReplicaColumn | undefined
 ): Date | null {
+  if (raw instanceof Date && !Number.isNaN(raw.getTime())) return raw
+  // Kept as a defensive fallback for hosts/paths that deliver a moment.js
+  // instance instead (some Grist code paths do) -- decodeGristValue would
+  // silently discard that shape too.
   const momentDate = extractMomentLikeDate(raw)
   if (momentDate) return momentDate
   const decoded = decodeGristValue(raw, schema)

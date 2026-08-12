@@ -570,11 +570,25 @@ describe("mapTaskRow / encodeTaskPatch", () => {
     expect(fields).not.toHaveProperty("campagne")
   })
 
+  it("decodes a Date cell delivered as a native Date instance, even with no schema loaded yet", () => {
+    // Confirmed live via the console diagnostic: `grist.onRecords(...,
+    // { keepEncoded: false })` hands Date/DateTime cells over as an actual
+    // `Date` object -- decodeGristValue has no "already a Date" branch, so
+    // it silently discards it (falls through to `return null`) unless this
+    // is caught on the raw value first.
+    const target = new Date("2026-07-20T00:00:00.000Z")
+    const task = mapTaskRow(
+      { id: 1, DATE_FIN: target },
+      { dateFin: "DATE_FIN" },
+      {} // schema not loaded yet -- matches the exact live diagnostic (schema: undefined)
+    )
+    expect(task.dateFin).toEqual(target)
+  })
+
   it("decodes a Date cell delivered as a moment.js-like object", () => {
-    // Also matches real `keepEncoded: false` behaviour: Date/DateTime cells
-    // arrive as a moment instance, which decodeGristValue doesn't recognize
-    // (and silently discards) since it's neither a marshalled tuple nor a
-    // plain epoch number.
+    // Defensive fallback for hosts/paths that deliver a moment instance
+    // instead of a native Date -- decodeGristValue doesn't recognize that
+    // shape either (neither a marshalled tuple nor a plain epoch number).
     const target = new Date(Date.UTC(2026, 6, 30))
     const momentLike = { toDate: () => target }
     const task = mapTaskRow(
