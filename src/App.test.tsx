@@ -454,6 +454,58 @@ describe("App", () => {
     })
   })
 
+  it("switches a filter to a dropdown once there are too many distinct values for pills", async () => {
+    // 10 distinct teams -- past FILTER_PILL_THRESHOLD (8) -- would otherwise
+    // wrap into a wall of individual pill buttons.
+    const doc: GristReplicaDocument = {
+      generatedAt: "1970-01-01T00:00:00.000Z",
+      docName: "Beaucoup d'équipes",
+      mode: "schema+data",
+      tables: {
+        Tasks: {
+          label: "Tasks",
+          columns: {
+            STATUT: {
+              type: "Choice",
+              label: "Statut",
+              widgetOptions: { choices: ["A faire"] },
+            },
+            TITRE: { type: "Text", label: "Titre" },
+            FILTRE_EQUIPE: { type: "Text", label: "Filtre par équipe" },
+          },
+          rows: Array.from({ length: 10 }, (_, i) => ({
+            id: i + 1,
+            STATUT: "A faire",
+            TITRE: `Tâche ${i + 1}`,
+            FILTRE_EQUIPE: `Équipe ${i + 1}`,
+          })),
+        },
+      },
+    }
+    renderWithGrist(<Wrapped />, {
+      emulator: { document: doc },
+    }).emulator.setColumnMappings({
+      statut: "STATUT",
+      titre: "TITRE",
+      filtreEquipe: "FILTRE_EQUIPE",
+    })
+
+    await waitFor(() => screen.getByText("Tâche 1"))
+
+    // Rendered as a dropdown, not one pill button per team.
+    expect(
+      screen.queryByRole("button", { name: "Équipe 1" })
+    ).not.toBeInTheDocument()
+    const select = screen.getByLabelText("Équipe")
+    expect(select.tagName).toBe("SELECT")
+
+    fireEvent.change(select, { target: { value: "Équipe 3" } })
+    await waitFor(() => {
+      expect(screen.getByText("Tâche 3")).toBeInTheDocument()
+      expect(screen.queryByText("Tâche 1")).not.toBeInTheDocument()
+    })
+  })
+
   it("shows Campagne as a #tag badge on the card when it's plain text (e.g. a computed column)", async () => {
     renderWithGrist(<Wrapped />, {
       emulator: { document: misconfiguredCampagneFixture() },

@@ -369,19 +369,51 @@ function TaskCardOverlay({
   )
 }
 
-/** One row of toggleable filter pills ("Tous" + each distinct value) --
- *  reused for both the équipe and campagne filters at the top of the board. */
-function FilterPillGroup({
+// Above this many distinct values, pills would wrap into a wall of buttons
+// spanning dozens of lines (e.g. 100+ teams) -- a compact dropdown scales far
+// better there, and most browsers let you jump to an entry by typing its
+// first letters even in a native <select>.
+const FILTER_PILL_THRESHOLD = 8
+
+/**
+ * One filter row: toggleable pills ("Tous" + each distinct value) for a
+ * handful of options, or a compact dropdown once there are too many --
+ * reused for both the équipe and campagne filters at the top of the board.
+ */
+function FilterGroup({
+  id,
   label,
   options,
   active,
   onChange,
 }: {
+  id: string
   label: string
   options: string[]
   active: string | null
   onChange: (value: string | null) => void
 }) {
+  if (options.length > FILTER_PILL_THRESHOLD) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <Label htmlFor={id}>{label}</Label>
+        <Select
+          id={id}
+          className="h-7 max-w-48 py-0 text-xs"
+          value={active ?? ""}
+          onChange={(e) => onChange(e.target.value || null)}
+        >
+          <option value="">Tous</option>
+          {options.map((value) => (
+            <option key={value} value={value}>
+              {value}
+            </option>
+          ))}
+        </Select>
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
@@ -1176,7 +1208,8 @@ function KanbanBoard({
       {filtreEquipeOptions.length > 0 || filtreCampagneOptions.length > 0 ? (
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border bg-background px-4 py-2">
           {filtreEquipeOptions.length > 0 ? (
-            <FilterPillGroup
+            <FilterGroup
+              id="filtre-equipe"
               label="Équipe"
               options={filtreEquipeOptions}
               active={activeEquipeFilter}
@@ -1184,7 +1217,8 @@ function KanbanBoard({
             />
           ) : null}
           {filtreCampagneOptions.length > 0 ? (
-            <FilterPillGroup
+            <FilterGroup
+              id="filtre-campagne"
               label="Campagne"
               options={filtreCampagneOptions}
               active={activeCampagneFilter}
