@@ -75,7 +75,7 @@ function decodeRefValue(
   raw: unknown,
   schema: GristReplicaColumn | undefined
 ): number | null {
-  const decoded = schema ? decodeGristValue(raw, schema) : raw
+  const decoded = decodeGristValue(raw, schema)
   if (Array.isArray(decoded)) {
     for (const item of decoded) {
       const id = unwrapRef(item)
@@ -111,7 +111,7 @@ function decodeMultiValue(
   schema: GristReplicaColumn | undefined
 ): string[] {
   const kind = resolveFieldKind(schema)
-  const decoded = schema ? decodeGristValue(raw, schema) : raw
+  const decoded = decodeGristValue(raw, schema)
   if (kind === "ref") {
     const rowId = unwrapRef(decoded)
     return rowId != null ? [String(rowId)] : []
@@ -154,7 +154,7 @@ function decodeDateValue(
   raw: unknown,
   schema: GristReplicaColumn | undefined
 ): Date | null {
-  const decoded = schema ? decodeGristValue(raw, schema) : raw
+  const decoded = decodeGristValue(raw, schema)
   if (decoded instanceof Date) return decoded
   if (typeof decoded === "number" && Number.isFinite(decoded)) {
     return new Date(decoded * 1000)
@@ -188,6 +188,47 @@ function warnIfColumnMissing(
   )
 }
 
+function isEmptyDecoded(value: unknown): boolean {
+  if (value == null || value === "") return true
+  return Array.isArray(value) && value.length === 0
+}
+
+function isEmptyRaw(raw: unknown): boolean {
+  if (raw == null || raw === "" || raw === 0) return true
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return true
+    // Marshalled empty-list tuple (`["L"]`) -- how Grist represents an
+    // empty ChoiceList/RefList cell, as opposed to a plain `[]`.
+    if (raw.length === 1 && raw[0] === "L") return true
+  }
+  return false
+}
+
+// Logged at most once per (logical field, real column): ground-truth for
+// "this field is mapped and Grist has data for it, but the widget still
+// shows it empty" -- prints exactly what Grist sent and what this widget's
+// decoder made of it, without needing another round of speculative fixes.
+const warnedDecodeFailures = new Set<string>()
+
+function warnIfDecodeFailed(
+  logical: string,
+  real: string,
+  raw: unknown,
+  schema: GristReplicaColumn | undefined,
+  decoded: unknown,
+  rowId: number
+) {
+  if (isEmptyRaw(raw) || !isEmptyDecoded(decoded)) return
+  const key = `${logical}:${real}`
+  if (warnedDecodeFailures.has(key)) return
+  warnedDecodeFailures.add(key)
+  console.warn(
+    `Kanban: le champ "${logical}" (colonne "${real}", type Grist déclaré "${schema?.type ?? "inconnu -- schéma non chargé"}") ` +
+      `a une valeur brute sur la ligne #${rowId} mais n'a pas pu être décodé.`,
+    { raw, schema, decoded }
+  )
+}
+
 /**
  * Rename a raw section row to logical field names and decode the cells that
  * need column-aware decoding (Date, Ref, ChoiceList) — everything else
@@ -206,23 +247,39 @@ export function mapTaskRow(
       if (raw === undefined) warnIfColumnMissing(logical, real, row)
       const schema = schemas[logical as keyof TaskMapped]
       switch (logical as keyof TaskMapped) {
-        case "campagne":
-          mapped.campagne = decodeRefValue(raw, schema)
+        case "campagne": {
+          const decoded = decodeRefValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
+          mapped.campagne = decoded
           break
-        case "dateDebut":
-          mapped.dateDebut = decodeDateValue(raw, schema)
+        }
+        case "dateDebut": {
+          const decoded = decodeDateValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
+          mapped.dateDebut = decoded
           break
-        case "dateFin":
-          mapped.dateFin = decodeDateValue(raw, schema)
+        }
+        case "dateFin": {
+          const decoded = decodeDateValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
+          mapped.dateFin = decoded
           break
-        case "type":
-          mapped.type = decodeMultiValue(raw, schema)
+        }
+        case "type": {
+          const decoded = decodeMultiValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
+          mapped.type = decoded
           break
-        case "gerePar":
-          mapped.gerePar = decodeMultiValue(raw, schema)
+        }
+        case "gerePar": {
+          const decoded = decodeMultiValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
+          mapped.gerePar = decoded
           break
+        }
         default: {
-          const decoded = schema ? decodeGristValue(raw, schema) : raw
+          const decoded = decodeGristValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
           ;(mapped as Record<string, unknown>)[logical] = decoded ?? ""
         }
       }

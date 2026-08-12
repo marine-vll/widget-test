@@ -6,7 +6,7 @@
  * same pattern applied to a bare shell.
  */
 import "@testing-library/jest-dom/vitest"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   GristBoundary,
   GristWidgetProvider,
@@ -371,6 +371,23 @@ describe("mapTaskRow / encodeTaskPatch", () => {
       {}
     )
     expect(task.dateFin).toEqual(new Date(epochSeconds * 1000))
+  })
+
+  it("does not warn about an empty ChoiceList sent as the marshalled ['L'] tuple", () => {
+    // Caught by this exact test while wiring up the decode-failure
+    // diagnostic: Grist represents an *empty* ChoiceList/RefList cell as the
+    // tag-only tuple `["L"]`, not a plain `[]` -- a naive "is this array
+    // empty" check misreads that as "there was data" and fires a false
+    // "failed to decode" warning for a column with no data at all.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const task = mapTaskRow(
+      { id: 2, TYPE: ["L"] },
+      { type: "TYPE" },
+      { type: { type: "ChoiceList", widgetOptions: { choices: ["Réunion"] } } }
+    )
+    expect(task.type).toEqual([])
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
   })
 })
 
