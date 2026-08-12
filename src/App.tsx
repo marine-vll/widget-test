@@ -48,6 +48,7 @@ import {
   refTargetTableId,
   resolveDropTarget,
   resolveFieldKind,
+  resolveRefOptionId,
   UNASSIGNED_STATUS,
   useRefRecordOptions,
   withSelectedFallback,
@@ -463,16 +464,42 @@ function AdaptiveMultiField({
   }
 
   if (kind === "ref") {
-    const selectedId = values[0] ? Number(values[0]) : null
+    // The value read back may be a row id *or* the linked record's display
+    // text (what Grist actually delivers for a Reference cell) -- resolve
+    // whichever it is against the fetched options to find the real id.
+    const rawValue = values[0] ?? null
+    const selectedId =
+      rawValue != null ? resolveRefOptionId(rawValue, refOptions) : null
+    // Text that didn't match any fetched option yet (still loading, or a
+    // genuine mismatch) -- keep it visible via a synthetic entry instead of
+    // reverting to "—", which would look exactly like "the value was lost".
+    const unresolved = rawValue != null && selectedId == null
     const options = withSelectedFallback(refOptions, selectedId, refLoading)
     return (
       <Select
         id={id}
         disabled={disabled}
-        value={selectedId != null ? String(selectedId) : ""}
-        onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
+        value={
+          unresolved
+            ? "__unresolved__"
+            : selectedId != null
+              ? String(selectedId)
+              : ""
+        }
+        onChange={(e) =>
+          onChange(
+            e.target.value && e.target.value !== "__unresolved__"
+              ? [e.target.value]
+              : []
+          )
+        }
       >
         <option value="">—</option>
+        {unresolved ? (
+          <option value="__unresolved__">
+            {refLoading ? "Chargement…" : rawValue}
+          </option>
+        ) : null}
         {options.map((opt) => (
           <option key={opt.id} value={opt.id}>
             {opt.label}
@@ -483,6 +510,19 @@ function AdaptiveMultiField({
   }
 
   if (kind === "reflist") {
+    // Same display-text-vs-id ambiguity as "ref" -- resolve each value
+    // against the fetched options before checking membership.
+    const selectedIds = new Set(
+      values
+        .map((v) => resolveRefOptionId(v, refOptions))
+        .filter((v): v is number => v != null)
+    )
+    function toggle(optId: number, checked: boolean) {
+      const next = new Set(selectedIds)
+      if (checked) next.add(optId)
+      else next.delete(optId)
+      onChange(Array.from(next, String))
+    }
     return (
       <div
         role="group"
@@ -494,25 +534,16 @@ function AdaptiveMultiField({
             {refLoading ? "Chargement…" : "Aucun élément disponible"}
           </p>
         ) : (
-          refOptions.map((opt) => {
-            const value = String(opt.id)
-            return (
-              <label key={opt.id} className="flex items-center gap-1.5 text-sm">
-                <Checkbox
-                  disabled={disabled}
-                  checked={values.includes(value)}
-                  onCheckedChange={(checked) =>
-                    onChange(
-                      checked === true
-                        ? [...values, value]
-                        : values.filter((v) => v !== value)
-                    )
-                  }
-                />
-                {opt.label}
-              </label>
-            )
-          })
+          refOptions.map((opt) => (
+            <label key={opt.id} className="flex items-center gap-1.5 text-sm">
+              <Checkbox
+                disabled={disabled}
+                checked={selectedIds.has(opt.id)}
+                onCheckedChange={(checked) => toggle(opt.id, checked === true)}
+              />
+              {opt.label}
+            </label>
+          ))
         )}
       </div>
     )

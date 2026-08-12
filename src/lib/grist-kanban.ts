@@ -96,6 +96,23 @@ function unwrapRef(value: unknown): number | null {
  * instead of dropping it silently, since the two are easy to mix up when
  * mapping a widget column.
  */
+/**
+ * Decode a cell whose column might be Text, Choice, ChoiceList, Ref, or
+ * RefList into a uniform string list (`[]` unset, `[value]` scalar, full
+ * list for ChoiceList/RefList, `[String(rowId)]` for a single Ref — labels
+ * resolved separately). Tolerates a value shape that doesn't match the
+ * declared kind (e.g. a scalar Choice read where `ChoiceList` was expected)
+ * instead of dropping it silently, since the two are easy to mix up when
+ * mapping a widget column.
+ *
+ * Ref/RefList also tolerate a *display-text* value instead of a row id:
+ * `grist.onRecords(..., { keepEncoded: false })` (what this widget uses)
+ * resolves a Reference/RefList cell to the linked record's rendered text,
+ * not its row id, before this widget ever sees it -- `decodeGristValue`
+ * has no way to turn text back into an id, so it's kept as-is and matched
+ * against the fetched linked-table options by label in the UI layer
+ * (`resolveRefOptionId`) instead of by id.
+ */
 function decodeMultiValue(
   raw: unknown,
   schema: GristReplicaColumn | undefined
@@ -104,34 +121,51 @@ function decodeMultiValue(
   const decoded = decodeGristValue(raw, schema)
   if (kind === "ref") {
     const rowId = unwrapRef(decoded)
-    return rowId != null ? [String(rowId)] : []
+    if (rowId != null) return [String(rowId)]
+    return typeof decoded === "string" && decoded ? [decoded] : []
   }
   if (kind === "reflist") {
-    if (!Array.isArray(decoded)) return []
+    if (!Array.isArray(decoded)) {
+      return typeof decoded === "string" && decoded ? [decoded] : []
+    }
     return decoded
-      .map((v) => unwrapRef(v))
-      .filter((v): v is number => v != null)
-      .map(String)
+      .map((v) => {
+        const id = unwrapRef(v)
+        return id != null ? String(id) : String(v)
+      })
+      .filter((v) => v && v !== "null")
   }
   if (Array.isArray(decoded)) return decoded.map((v) => String(v))
   if (decoded == null || decoded === "") return []
   return [String(decoded)]
 }
 
-/** Encode a uniform string list back to the wire form matching the column's actual kind. */
+/**
+ * Encode a uniform string list back to the wire form matching the column's
+ * actual kind. Returns `undefined` (meaning "don't send this field at all")
+ * when a Ref/RefList value can't be resolved to a real row id -- e.g. it's
+ * still holding the display text `decodeMultiValue` read it as (the field
+ * was never touched in the form) -- writing `NaN`/garbage into an untouched,
+ * perfectly fine cell would be worse than just leaving it out of the patch.
+ */
 function encodeMultiValue(
   values: string[],
   schema: GristReplicaColumn | undefined
 ): unknown {
   const kind = resolveFieldKind(schema)
   if (kind === "choicelist") return encodeGristValue(values, schema)
-  if (kind === "ref")
-    return encodeGristValue(values[0] ? Number(values[0]) : null, schema)
-  if (kind === "reflist")
-    return encodeGristValue(
-      values.map((v) => Number(v)).filter((n) => Number.isFinite(n)),
-      schema
-    )
+  if (kind === "ref") {
+    if (values.length === 0) return encodeGristValue(null, schema)
+    const id = Number(values[0])
+    return Number.isFinite(id) ? encodeGristValue(id, schema) : undefined
+  }
+  if (kind === "reflist") {
+    if (values.length === 0) return encodeGristValue([], schema)
+    const ids = values.map(Number)
+    return ids.every(Number.isFinite)
+      ? encodeGristValue(ids, schema)
+      : undefined
+  }
   return values[0] ?? ""
 }
 
@@ -140,12 +174,37 @@ function encodeMultiValue(
  * already normalize to a `Date` (a raw epoch number when the column's type
  * string didn't match exactly, or an ISO string) instead of giving up.
  */
+/**
+ * `grist.onRecords(..., { keepEncoded: false })` -- what this widget uses --
+ * hands a Date/DateTime cell over as a moment.js instance on the real Grist
+ * client, not a marshalled tuple or a plain epoch number. `decodeGristValue`
+ * only recognizes the marshalled/plain-number shapes and silently discards
+ * anything else (a moment object matches none of its branches), so that
+ * shape has to be caught here, on the *raw* value, before it's lost.
+ */
+function extractMomentLikeDate(value: unknown): Date | null {
+  if (
+    value &&
+    typeof value === "object" &&
+    "toDate" in value &&
+    typeof (value as { toDate: unknown }).toDate === "function"
+  ) {
+    const asDate = (value as { toDate: () => unknown }).toDate()
+    if (asDate instanceof Date && !Number.isNaN(asDate.getTime())) return asDate
+  }
+  return null
+}
+
 function decodeDateValue(
   raw: unknown,
   schema: GristReplicaColumn | undefined
 ): Date | null {
+  const momentDate = extractMomentLikeDate(raw)
+  if (momentDate) return momentDate
   const decoded = decodeGristValue(raw, schema)
   if (decoded instanceof Date) return decoded
+  const decodedMomentDate = extractMomentLikeDate(decoded)
+  if (decodedMomentDate) return decodedMomentDate
   if (typeof decoded === "number" && Number.isFinite(decoded)) {
     return new Date(decoded * 1000)
   }
@@ -308,17 +367,38 @@ export function encodeTaskPatch(
   patch: Partial<TaskMapped>,
   schemas: TaskColumnSchemas
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...patch }
-  if ("dateDebut" in patch)
-    out.dateDebut = encodeGristValue(patch.dateDebut, schemas.dateDebut)
-  if ("dateFin" in patch)
-    out.dateFin = encodeGristValue(patch.dateFin, schemas.dateFin)
-  if ("campagne" in patch)
-    out.campagne = encodeMultiValue(patch.campagne ?? [], schemas.campagne)
-  if ("type" in patch)
-    out.type = encodeMultiValue(patch.type ?? [], schemas.type)
-  if ("gerePar" in patch)
-    out.gerePar = encodeMultiValue(patch.gerePar ?? [], schemas.gerePar)
+  // Built up field-by-field rather than `{ ...patch }` + overwrite: a
+  // Ref/RefList field that `encodeMultiValue` can't resolve returns
+  // `undefined` (skip it) -- spreading `patch` first would leave its raw,
+  // un-encoded value sitting in `out` in that case instead of omitting it.
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(patch)) {
+    switch (key as keyof TaskMapped) {
+      case "dateDebut":
+        out.dateDebut = encodeGristValue(value, schemas.dateDebut)
+        break
+      case "dateFin":
+        out.dateFin = encodeGristValue(value, schemas.dateFin)
+        break
+      case "campagne": {
+        const encoded = encodeMultiValue(value as string[], schemas.campagne)
+        if (encoded !== undefined) out.campagne = encoded
+        break
+      }
+      case "type": {
+        const encoded = encodeMultiValue(value as string[], schemas.type)
+        if (encoded !== undefined) out.type = encoded
+        break
+      }
+      case "gerePar": {
+        const encoded = encodeMultiValue(value as string[], schemas.gerePar)
+        if (encoded !== undefined) out.gerePar = encoded
+        break
+      }
+      default:
+        out[key] = value
+    }
+  }
   return out
 }
 
@@ -434,6 +514,23 @@ export function useRefRecordOptions(
   const options = isCurrent ? fetched.options : []
   const loading = targetTableId != null && columns != null && !isCurrent
   return { options, loading }
+}
+
+/**
+ * Resolve a Ref/RefList value read back from `decodeMultiValue` against a
+ * fetched options list. That value is normally the linked record's row id
+ * as a string, but per `decodeMultiValue`'s own doc comment it may instead
+ * be the record's *display text* (what `keepEncoded: false` actually
+ * delivers for a Reference cell) -- try an id match first, then fall back
+ * to matching by label.
+ */
+export function resolveRefOptionId(
+  value: string,
+  options: RefRecordOption[]
+): number | null {
+  const asId = Number(value)
+  if (Number.isFinite(asId) && options.some((o) => o.id === asId)) return asId
+  return options.find((o) => o.label === value)?.id ?? null
 }
 
 /**

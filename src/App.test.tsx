@@ -28,6 +28,7 @@ import {
   findUnmappedColumns,
   mapTaskRow,
   resolveDropTarget,
+  resolveRefOptionId,
 } from "@/lib/grist-kanban"
 
 import App, { GRIST_OPTIONS } from "./App"
@@ -158,6 +159,47 @@ function misconfiguredCampagneFixture(): GristReplicaDocument {
             TITRE: "Réalisation de vidéos courtes",
             CAMPAGNE_NOM: "France Botswana Forward",
           },
+        ],
+      },
+    },
+  }
+}
+
+// Reproduces the other live report: mapped to "Campagnes", a genuine
+// Ref:Campagnes column -- but Grist (`keepEncoded: false`) delivers the
+// linked record's *display text*, not its row id.
+function refDeliveredAsTextFixture(): GristReplicaDocument {
+  return {
+    generatedAt: "1970-01-01T00:00:00.000Z",
+    docName: "Suivi campagnes",
+    mode: "schema+data",
+    tables: {
+      Tasks: {
+        label: "Tasks",
+        columns: {
+          STATUT: {
+            type: "Choice",
+            label: "Statut",
+            widgetOptions: { choices: ["A faire"] },
+          },
+          TITRE: { type: "Text", label: "Titre" },
+          CAMPAGNE: { type: "Ref:Campagnes", label: "Campagne" },
+        },
+        rows: [
+          {
+            id: 1,
+            STATUT: "A faire",
+            TITRE: "Diffusion sur smartvillage.africa",
+            CAMPAGNE: "Campagne Beta",
+          },
+        ],
+      },
+      Campagnes: {
+        label: "Campagnes",
+        columns: { NOM: { type: "Text", label: "Nom" } },
+        rows: [
+          { id: 1, NOM: "Campagne Alpha" },
+          { id: 2, NOM: "Campagne Beta" },
         ],
       },
     },
@@ -388,6 +430,42 @@ describe("App", () => {
     })
   })
 
+  it("pre-selects the right Campagne even when the real Ref column delivers display text instead of a row id", async () => {
+    const { emulator } = renderWithGrist(<Wrapped />, {
+      emulator: { document: refDeliveredAsTextFixture() },
+    })
+    emulator.setColumnMappings({
+      statut: "STATUT",
+      titre: "TITRE",
+      campagne: "CAMPAGNE",
+    })
+
+    await waitFor(() => screen.getByText("Diffusion sur smartvillage.africa"))
+    fireEvent.click(screen.getByText("Diffusion sur smartvillage.africa"))
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("Campagne")).toHaveValue("2")
+    )
+    expect(
+      within(screen.getByLabelText("Campagne")).getByText("Campagne Beta")
+    ).toBeInTheDocument()
+
+    // Picking a different campaign now writes its real row id, not text.
+    fireEvent.change(screen.getByLabelText("Campagne"), {
+      target: { value: "1" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
+    })
+
+    await waitFor(() => {
+      const [, , , fields] = actionsOf(emulator).find(
+        (a) => a[0] === "UpdateRecord" && a[2] === 1
+      ) as [string, string, number, Record<string, unknown>]
+      expect(fields.CAMPAGNE).toBe(1)
+    })
+  })
+
   it("deletes a task", async () => {
     const { emulator } = renderBoard()
 
@@ -468,6 +546,45 @@ describe("mapTaskRow / encodeTaskPatch", () => {
     expect(task.campagne).toEqual(["France Botswana Forward"])
   })
 
+  it("reads a genuine Reference column even when Grist delivers its display text instead of a row id", () => {
+    // `grist.onRecords(..., { keepEncoded: false })` -- what this widget
+    // uses -- resolves a Reference cell to the linked record's rendered
+    // text, not its row id. A real "Ref:Campagnes" column can show up with
+    // exactly this shape; it must not be treated as "no data".
+    const task = mapTaskRow(
+      { id: 1, CAMPAGNE: "France Botswana Forward" },
+      { campagne: "CAMPAGNE" },
+      { campagne: { type: "Ref:Campagnes" } }
+    )
+    expect(task.campagne).toEqual(["France Botswana Forward"])
+  })
+
+  it("omits Campagne from the write-back patch instead of sending NaN when it's still unresolved display text", () => {
+    // The form only ever produces a real row id once the user has actually
+    // picked something from the (fetched) options list; until then, an
+    // untouched Ref field is still holding the display text it was read as.
+    const fields = encodeTaskPatch(
+      { campagne: ["France Botswana Forward"] },
+      { campagne: { type: "Ref:Campagnes" } }
+    )
+    expect(fields).not.toHaveProperty("campagne")
+  })
+
+  it("decodes a Date cell delivered as a moment.js-like object", () => {
+    // Also matches real `keepEncoded: false` behaviour: Date/DateTime cells
+    // arrive as a moment instance, which decodeGristValue doesn't recognize
+    // (and silently discards) since it's neither a marshalled tuple nor a
+    // plain epoch number.
+    const target = new Date(Date.UTC(2026, 6, 30))
+    const momentLike = { toDate: () => target }
+    const task = mapTaskRow(
+      { id: 1, DATE_FIN: momentLike },
+      { dateFin: "DATE_FIN" },
+      { dateFin: { type: "Date" } }
+    )
+    expect(task.dateFin).toEqual(target)
+  })
+
   it("decodes a Date cell even when no column schema is available yet", () => {
     // buildColumnSchemas() can legitimately return `{}` for a render before
     // the schema fetch resolves; the date should still come through as a
@@ -523,5 +640,25 @@ describe("resolveDropTarget", () => {
 
   it("returns null when dropped outside any droppable", () => {
     expect(resolveDropTarget({ active: { id: 1 }, over: null })).toBeNull()
+  })
+})
+
+describe("resolveRefOptionId", () => {
+  const options = [
+    { id: 1, label: "Campagne Alpha" },
+    { id: 2, label: "Campagne Beta" },
+  ]
+
+  it("matches by id when the value is already a resolvable row id", () => {
+    expect(resolveRefOptionId("2", options)).toBe(2)
+  })
+
+  it("falls back to matching by label when the value is display text", () => {
+    // The shape `keepEncoded: false` actually delivers for a Reference cell.
+    expect(resolveRefOptionId("Campagne Beta", options)).toBe(2)
+  })
+
+  it("returns null when nothing matches", () => {
+    expect(resolveRefOptionId("Campagne inconnue", options)).toBeNull()
   })
 })
