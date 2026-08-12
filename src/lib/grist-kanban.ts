@@ -54,14 +54,23 @@ export function resolveFieldKind(schema?: GristReplicaColumn): FieldKind {
 
 /**
  * Whether a column is (or might turn out to be, before its schema has
- * loaded) an actual Date/DateTime column. Used to decide whether a date
- * field's UI should show the native date input or fall back to a read-only
- * display, *without* flashing that fallback during the normal window before
- * `schema` resolves -- `undefined` gets the benefit of the doubt.
+ * loaded) an actual Date/DateTime column. `undefined` gets the benefit of
+ * the doubt (schema still loading) so the date input doesn't flash to a
+ * disabled state and back during the normal loading window.
  */
 export function isDateLikeColumn(schema?: GristReplicaColumn): boolean {
   if (!schema?.type) return true
   return schema.type === "Date" || schema.type.startsWith("DateTime")
+}
+
+/**
+ * Whether a column is a Grist formula (computed) column -- writes to it are
+ * rejected by Grist regardless of what the widget's UI offers, so fields
+ * backed by one are rendered disabled rather than attempted and failed.
+ * Mirrors the previous kanban2 widget's own `getIsFormula()` check.
+ */
+export function isFormulaColumn(schema?: GristReplicaColumn): boolean {
+  return schema?.isFormula === true
 }
 
 /**
@@ -76,35 +85,6 @@ function unwrapRef(value: unknown): number | null {
     return typeof rowId === "number" && rowId !== 0 ? rowId : null
   }
   return typeof value === "number" && value !== 0 ? value : null
-}
-
-/**
- * Extract a single row id from an already-decoded Ref *or* RefList value
- * (the first linked record for a RefList) — the dedicated Campagne field
- * keeps a single-select UI even when the underlying column technically
- * allows several. Takes the decoded value (not raw + schema) so callers can
- * reuse the same `decodeGristValue` call for a display-text fallback too.
- */
-function extractRefId(decoded: unknown): number | null {
-  if (Array.isArray(decoded)) {
-    for (const item of decoded) {
-      const id = unwrapRef(item)
-      if (id != null) return id
-    }
-    return null
-  }
-  return unwrapRef(decoded)
-}
-
-/** Encode a single row id back to a Ref *or* RefList cell, matching the column's actual kind. */
-function encodeRefValue(
-  value: number | null,
-  schema: GristReplicaColumn | undefined
-): unknown {
-  if (resolveFieldKind(schema) === "reflist") {
-    return encodeGristValue(value != null ? [value] : [], schema)
-  }
-  return encodeGristValue(value, schema)
 }
 
 /**
@@ -258,18 +238,13 @@ export function mapTaskRow(
       const schema = schemas[logical as keyof TaskMapped]
       switch (logical as keyof TaskMapped) {
         case "campagne": {
-          const decodedRaw = decodeGristValue(raw, schema)
-          const id = extractRefId(decodedRaw)
-          warnIfDecodeFailed(logical, real, raw, schema, id, row.id)
-          mapped.campagne = id
-          // The mapped column often turns out not to be an actual Ref/
-          // RefList (e.g. a computed "display" column showing the linked
-          // record's name as plain text) -- keep that text around so the
-          // UI can show *something* instead of a silently-blank reference.
-          mapped.campagneDisplay =
-            id == null && typeof decodedRaw === "string" && decodedRaw
-              ? decodedRaw
-              : null
+          // Not required to be an actual Reference (same convention as
+          // Type / Géré par l'équipe, and the widget this one replaces):
+          // whatever the mapped column turns out to be, decodeMultiValue
+          // normalizes it to a uniform string list.
+          const decoded = decodeMultiValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
+          mapped.campagne = decoded
           break
         }
         case "dateDebut": {
@@ -312,8 +287,7 @@ export function mapTaskRow(
     id: row.id,
     statut: mapped.statut ?? null,
     titre: mapped.titre ?? "",
-    campagne: mapped.campagne ?? null,
-    campagneDisplay: mapped.campagneDisplay ?? null,
+    campagne: mapped.campagne ?? [],
     dateDebut: mapped.dateDebut ?? null,
     dateDebutDisplay: mapped.dateDebutDisplay ?? null,
     dateFin: mapped.dateFin ?? null,
@@ -340,7 +314,7 @@ export function encodeTaskPatch(
   if ("dateFin" in patch)
     out.dateFin = encodeGristValue(patch.dateFin, schemas.dateFin)
   if ("campagne" in patch)
-    out.campagne = encodeRefValue(patch.campagne ?? null, schemas.campagne)
+    out.campagne = encodeMultiValue(patch.campagne ?? [], schemas.campagne)
   if ("type" in patch)
     out.type = encodeMultiValue(patch.type ?? [], schemas.type)
   if ("gerePar" in patch)
@@ -531,13 +505,17 @@ export function findUnmappedColumns(
   return gaps
 }
 
-/** Distinct, non-empty values of a multi-value field across a set of tasks, for building filter pills. */
-export function distinctFieldValues(
-  tasks: readonly { gerePar: string[] }[]
-): string[] {
+/**
+ * Distinct, non-empty values across a set of multi-value fields (e.g. every
+ * task's `gerePar`, or every task's `campagne`) — used both for filter pills
+ * and as free-text autocomplete suggestions (kanban2's own "reference"
+ * field offered a datalist over the column's existing values rather than a
+ * real foreign-key lookup; same idea here for a Text/Any-typed column).
+ */
+export function distinctValues(lists: Iterable<string[]>): string[] {
   const seen = new Set<string>()
-  for (const task of tasks) {
-    for (const value of task.gerePar) {
+  for (const list of lists) {
+    for (const value of list) {
       if (value) seen.add(value)
     }
   }

@@ -335,7 +335,21 @@ describe("App", () => {
     )
   })
 
-  it("shows a read-only notice for Campagne when it's mapped to a computed column, and never writes to it", async () => {
+  it("shows Campagne as a #tag badge on the card when it's plain text (e.g. a computed column)", async () => {
+    renderWithGrist(<Wrapped />, {
+      emulator: { document: misconfiguredCampagneFixture() },
+    }).emulator.setColumnMappings({
+      statut: "STATUT",
+      titre: "TITRE",
+      campagne: "CAMPAGNE_NOM",
+    })
+
+    await waitFor(() =>
+      expect(screen.getByText("#France Botswana Forward")).toBeInTheDocument()
+    )
+  })
+
+  it("keeps Campagne editable-looking (not a scary error) but disabled when the mapped column is a Grist formula, and never writes to it", async () => {
     const { emulator } = renderWithGrist(<Wrapped />, {
       emulator: { document: misconfiguredCampagneFixture() },
     })
@@ -348,18 +362,15 @@ describe("App", () => {
     await waitFor(() => screen.getByText("Réalisation de vidéos courtes"))
     fireEvent.click(screen.getByText("Réalisation de vidéos courtes"))
 
-    // Read-only: the raw text is shown (also on the card behind the panel,
-    // hence scoping to the dialog), but there's no interactive select.
-    const dialog = await screen.findByRole("dialog")
+    // Same widget-level field as an editable Campagne would use (a real,
+    // labeled control) -- just disabled, since Grist would reject a write
+    // to a formula column regardless of what the UI offers.
     await waitFor(() =>
-      expect(
-        within(dialog).getByText("France Botswana Forward")
-      ).toBeInTheDocument()
+      expect(screen.getByLabelText("Campagne")).toHaveValue(
+        "France Botswana Forward"
+      )
     )
-    expect(screen.queryByLabelText("Campagne")).not.toBeInTheDocument()
-    expect(
-      within(dialog).getByText(/n'est pas une référence modifiable/)
-    ).toBeInTheDocument()
+    expect(screen.getByLabelText("Campagne")).toBeDisabled()
 
     fireEvent.change(screen.getByLabelText("Titre"), {
       target: { value: "Réalisation de vidéos courtes (v2)" },
@@ -421,28 +432,28 @@ describe("findUnmappedColumns", () => {
 describe("mapTaskRow / encodeTaskPatch", () => {
   it("reads Campagne from a RefList column (not just a plain Ref)", () => {
     // Some documents model a "linked to one or more records" column as
-    // RefList rather than Ref -- the dedicated single-select Campagne field
-    // should still show the first linked record instead of staying blank.
+    // RefList rather than Ref.
     const task = mapTaskRow(
       { id: 1, CAMPAGNE: [3, 5] },
       { campagne: "CAMPAGNE" },
       { campagne: { type: "RefList:Campagnes" } }
     )
-    expect(task.campagne).toBe(3)
+    expect(task.campagne).toEqual(["3", "5"])
   })
 
   it("writes Campagne back as a list when the column is RefList", () => {
     const fields = encodeTaskPatch(
-      { campagne: 7 },
+      { campagne: ["7"] },
       { campagne: { type: "RefList:Campagnes" } }
     )
     expect(fields.campagne).toEqual(["L", 7])
   })
 
-  it("falls back to a display string when Campagne is mapped to a computed column instead of a real reference", () => {
+  it("reads Campagne as plain text when mapped to a computed column instead of a real reference", () => {
     // The exact shape found live: "Campagne_Nom" turned out to be a formula
     // column (type "Any", isFormula: true) returning the linked record's
-    // name as plain text, not the reference itself.
+    // name as plain text, not the reference itself -- like kanban2's own
+    // "reference" field, this is accepted as-is rather than rejected.
     const task = mapTaskRow(
       { id: 1, CAMPAGNE_NOM: "France Botswana Forward" },
       { campagne: "CAMPAGNE_NOM" },
@@ -454,8 +465,7 @@ describe("mapTaskRow / encodeTaskPatch", () => {
         },
       }
     )
-    expect(task.campagne).toBeNull()
-    expect(task.campagneDisplay).toBe("France Botswana Forward")
+    expect(task.campagne).toEqual(["France Botswana Forward"])
   })
 
   it("decodes a Date cell even when no column schema is available yet", () => {

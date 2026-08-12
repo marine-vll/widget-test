@@ -38,11 +38,12 @@ import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
 import {
   buildColumnSchemas,
-  distinctFieldValues,
+  distinctValues,
   encodeTaskPatch,
   findUnmappedColumns,
   getStatutChoices,
   isDateLikeColumn,
+  isFormulaColumn,
   mapTaskRow,
   refTargetTableId,
   resolveDropTarget,
@@ -64,12 +65,12 @@ export const GRIST_OPTIONS: UseGristOptions = {
   columns: [
     { name: "statut", title: "Statut", type: "Choice" },
     { name: "titre", title: "Titre", type: "Text" },
-    {
-      name: "campagne",
-      title: "Campagne",
-      type: "Ref,RefList",
-      optional: true,
-    },
+    // No type restriction (matches the previous kanban2 widget's own
+    // "Reference" field): whatever the mapped column turns out to be --
+    // Text, Choice, ChoiceList, Ref, RefList, even a computed "Any"
+    // formula column -- the form adapts (see `resolveFieldKind` /
+    // `AdaptiveMultiField`) instead of requiring a real Reference.
+    { name: "campagne", title: "Campagne", optional: true },
     {
       name: "dateDebut",
       title: "Date de début",
@@ -128,15 +129,18 @@ function EmptyState({ title, message }: { title: string; message: string }) {
   )
 }
 
-/** The campagne id resolves to a fetched label; otherwise fall back to whatever raw text `mapTaskRow` kept around. */
+/**
+ * When Campagne is a real Ref/RefList, resolve its id to a fetched label;
+ * otherwise `task.campagne[0]` is already the display text (Text/Choice/Any
+ * column), so the lookup simply misses and that raw value is used as-is.
+ */
 function resolveCampagneLabel(
   task: Task,
-  campagneLabelById: Map<number, string>
+  campagneLabelById: Map<string, string>
 ): string | null {
-  if (task.campagne != null) {
-    return campagneLabelById.get(task.campagne) ?? `#${task.campagne}`
-  }
-  return task.campagneDisplay
+  const value = task.campagne[0]
+  if (value == null) return null
+  return campagneLabelById.get(value) ?? value
 }
 
 type ColumnData = { value: string; label: string; tasks: Task[] }
@@ -191,7 +195,7 @@ function formatDate(date: Date): string {
 }
 
 type Draft = {
-  campagne: number | null
+  campagne: string[]
   titre: string
   dateDebut: string
   dateFin: string
@@ -205,7 +209,7 @@ type Draft = {
 
 function draftFromTask(task: Task | null, defaultStatut: string): Draft {
   return {
-    campagne: task?.campagne ?? null,
+    campagne: task?.campagne ?? [],
     titre: task?.titre ?? "",
     dateDebut: toDateInputValue(task?.dateDebut ?? null),
     dateFin: toDateInputValue(task?.dateFin ?? null),
@@ -228,17 +232,18 @@ function TaskCardContent({
 }) {
   return (
     <>
+      {campagneLabel ? (
+        <div className="mb-1 flex justify-end">
+          <span className="max-w-full truncate rounded-sm border border-border px-1.5 py-0.5 text-xs text-muted-foreground">
+            #{campagneLabel}
+          </span>
+        </div>
+      ) : null}
       <p className="font-medium text-foreground">
         {task.titre || "(Sans titre)"}
       </p>
-      {campagneLabel || task.service || task.dateFin || task.dateFinDisplay ? (
+      {task.service || task.dateFin || task.dateFinDisplay ? (
         <dl className="mt-1.5 flex flex-col gap-0.5 text-xs text-muted-foreground">
-          {campagneLabel ? (
-            <div className="flex gap-1">
-              <dt className="shrink-0">Campagne :</dt>
-              <dd className="truncate">{campagneLabel}</dd>
-            </div>
-          ) : null}
           {task.service ? (
             <div className="flex gap-1">
               <dt className="shrink-0">Service :</dt>
@@ -330,7 +335,7 @@ function KanbanColumn({
   onOpenTask,
 }: {
   column: ColumnData
-  campagneLabelById: Map<number, string>
+  campagneLabelById: Map<string, string>
   onOpenTask: (task: Task) => void
 }) {
   const { setNodeRef, isOver } = useDroppable({
@@ -389,6 +394,8 @@ function AdaptiveMultiField({
   choices,
   refOptions,
   refLoading,
+  suggestions = [],
+  disabled = false,
 }: {
   id: string
   kind: FieldKind
@@ -397,6 +404,11 @@ function AdaptiveMultiField({
   choices: GristChoiceListEntry[]
   refOptions: RefRecordOption[]
   refLoading: boolean
+  /** Free-text kind only: past values of this same field, offered as a datalist autocomplete
+   *  (mirrors the previous widget's own "reference" field, which had no linked table to browse). */
+  suggestions?: string[]
+  /** The mapped column is a Grist formula -- Grist rejects writes to it regardless of this UI. */
+  disabled?: boolean
 }) {
   if (kind === "choicelist") {
     return (
@@ -414,6 +426,7 @@ function AdaptiveMultiField({
               className="flex items-center gap-1.5 text-sm"
             >
               <Checkbox
+                disabled={disabled}
                 checked={values.includes(choice.value)}
                 onCheckedChange={(checked) =>
                   onChange(
@@ -435,6 +448,7 @@ function AdaptiveMultiField({
     return (
       <Select
         id={id}
+        disabled={disabled}
         value={values[0] ?? ""}
         onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
       >
@@ -454,6 +468,7 @@ function AdaptiveMultiField({
     return (
       <Select
         id={id}
+        disabled={disabled}
         value={selectedId != null ? String(selectedId) : ""}
         onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
       >
@@ -484,6 +499,7 @@ function AdaptiveMultiField({
             return (
               <label key={opt.id} className="flex items-center gap-1.5 text-sm">
                 <Checkbox
+                  disabled={disabled}
                   checked={values.includes(value)}
                   onCheckedChange={(checked) =>
                     onChange(
@@ -502,40 +518,27 @@ function AdaptiveMultiField({
     )
   }
 
+  // text / unknown -- a free-text value, optionally with a datalist of
+  // previously-seen values in this same field to make selection easier
+  // without needing a real linked table (kanban2's own approach).
+  const listId = suggestions.length > 0 ? `${id}-suggestions` : undefined
   return (
-    <Input
-      id={id}
-      value={values[0] ?? ""}
-      onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
-    />
-  )
-}
-
-/**
- * Read-only stand-in for a field whose mapped Grist column turned out not to
- * be usable as declared (e.g. Campagne mapped to a computed display column
- * instead of an actual reference) -- shows whatever raw text is available
- * plus an actionable explanation, instead of a silently-blank control.
- */
-function NonEditableFieldNotice({
-  id,
-  value,
-  message,
-}: {
-  id: string
-  value: string | null
-  message: string
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <div
+    <>
+      <Input
         id={id}
-        className="flex h-8 items-center rounded-lg border border-dashed border-input px-2.5 text-sm text-muted-foreground"
-      >
-        {value || "—"}
-      </div>
-      <p className="text-xs text-destructive">{message}</p>
-    </div>
+        list={listId}
+        disabled={disabled}
+        value={values[0] ?? ""}
+        onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
+      />
+      {listId ? (
+        <datalist id={listId}>
+          {suggestions.map((s) => (
+            <option key={s} value={s} />
+          ))}
+        </datalist>
+      ) : null}
+    </>
   )
 }
 
@@ -546,15 +549,22 @@ function TaskFormPanel({
   statutChoices,
   typeKind,
   typeChoices,
+  typeDisabled,
   campagneKind,
+  campagneChoices,
   campagneOptions,
   campagneLoading,
+  campagneSuggestions,
+  campagneDisabled,
   dateDebutIsDate,
+  dateDebutDisabled,
   dateFinIsDate,
+  dateFinDisabled,
   gereParKind,
   gereParChoices,
   gereParOptions,
   gereParLoading,
+  gereParDisabled,
   onSave,
   onDelete,
 }: {
@@ -564,26 +574,25 @@ function TaskFormPanel({
   statutChoices: GristChoiceListEntry[]
   typeKind: FieldKind
   typeChoices: GristChoiceListEntry[]
+  typeDisabled: boolean
   campagneKind: FieldKind
+  campagneChoices: GristChoiceListEntry[]
   campagneOptions: RefRecordOption[]
   campagneLoading: boolean
+  campagneSuggestions: string[]
+  campagneDisabled: boolean
   dateDebutIsDate: boolean
+  dateDebutDisabled: boolean
   dateFinIsDate: boolean
+  dateFinDisabled: boolean
   gereParKind: FieldKind
   gereParChoices: GristChoiceListEntry[]
   gereParOptions: RefRecordOption[]
   gereParLoading: boolean
+  gereParDisabled: boolean
   onSave: (patch: Partial<TaskMapped>) => Promise<void>
   onDelete?: () => Promise<void>
 }) {
-  // "unknown" (schema not loaded yet) gets the benefit of the doubt so the
-  // select doesn't flash to the read-only fallback and back during the
-  // normal loading window -- only a *confirmed* wrong type (text/choice/
-  // choicelist) falls back to the read-only notice.
-  const campagneIsRef =
-    campagneKind !== "text" &&
-    campagneKind !== "choice" &&
-    campagneKind !== "choicelist"
   const [draft, setDraft] = useState<Draft>(() =>
     draftFromTask(task, defaultStatut)
   )
@@ -591,6 +600,8 @@ function TaskFormPanel({
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const busy = saving || deleting
+  const dateDebutEditable = dateDebutIsDate && !dateDebutDisabled
+  const dateFinEditable = dateFinIsDate && !dateFinDisabled
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -598,24 +609,23 @@ function TaskFormPanel({
     setSaving(true)
     try {
       await onSave({
-        // Only send Campagne back when the mapped column is an actual
-        // Ref/RefList -- otherwise it's a computed/display column (see the
-        // read-only fallback below) and Grist would reject or ignore a
-        // write to it anyway.
-        ...(campagneIsRef ? { campagne: draft.campagne } : {}),
+        // Grist rejects a write to a formula-backed column regardless of
+        // what this UI shows -- omit these from the patch entirely rather
+        // than let the whole save fail over an untouched disabled field.
+        ...(campagneDisabled ? {} : { campagne: draft.campagne }),
         titre: draft.titre,
-        ...(dateDebutIsDate
+        ...(dateDebutEditable
           ? { dateDebut: fromDateInputValue(draft.dateDebut) }
           : {}),
-        ...(dateFinIsDate
+        ...(dateFinEditable
           ? { dateFin: fromDateInputValue(draft.dateFin) }
           : {}),
         service: draft.service,
-        type: draft.type,
+        ...(typeDisabled ? {} : { type: draft.type }),
         commentaires: draft.commentaires,
         statut: draft.statut,
         creePar: draft.creePar,
-        gerePar: draft.gerePar,
+        ...(gereParDisabled ? {} : { gerePar: draft.gerePar }),
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -642,38 +652,27 @@ function TaskFormPanel({
     >
       <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
         <div className="grid flex-1 auto-rows-min grid-cols-2 gap-4 overflow-y-auto px-5 py-4">
-          {/* Ligne 1 : Campagne (référence) */}
+          {/* Ligne 1 : Campagne -- pas forcément une vraie Référence Grist
+              (voir kanban2, dont ce champ s'inspire) : le contrôle s'adapte
+              au type réel de la colonne mappée, désactivé seulement si
+              c'est une colonne calculée que Grist refuserait d'écrire. */}
           <div className="col-span-2 flex flex-col gap-1.5">
-            <Label htmlFor="task-campagne">Campagne</Label>
-            {campagneIsRef ? (
-              <Select
-                id="task-campagne"
-                value={draft.campagne != null ? String(draft.campagne) : ""}
-                onChange={(e) =>
-                  setDraft((d) => ({
-                    ...d,
-                    campagne: e.target.value ? Number(e.target.value) : null,
-                  }))
-                }
-              >
-                <option value="">—</option>
-                {withSelectedFallback(
-                  campagneOptions,
-                  draft.campagne,
-                  campagneLoading
-                ).map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </Select>
-            ) : (
-              <NonEditableFieldNotice
-                id="task-campagne"
-                value={task?.campagneDisplay ?? null}
-                message="La colonne associée à «Campagne» n'est pas une référence modifiable (elle est calculée). Dans la configuration du widget Grist, associe ce champ à la véritable colonne de référence pour pouvoir la modifier ici."
-              />
-            )}
+            <Label htmlFor="task-campagne" id="task-campagne-label">
+              Campagne
+            </Label>
+            <AdaptiveMultiField
+              id="task-campagne"
+              kind={campagneKind}
+              values={draft.campagne}
+              onChange={(values) =>
+                setDraft((d) => ({ ...d, campagne: values }))
+              }
+              choices={campagneChoices}
+              refOptions={campagneOptions}
+              refLoading={campagneLoading}
+              suggestions={campagneSuggestions}
+              disabled={campagneDisabled}
+            />
           </div>
 
           {/* Ligne 2 : Titre */}
@@ -696,16 +695,18 @@ function TaskFormPanel({
               <Input
                 id="task-date-debut"
                 type="date"
+                disabled={dateDebutDisabled}
                 value={draft.dateDebut}
                 onChange={(e) =>
                   setDraft((d) => ({ ...d, dateDebut: e.target.value }))
                 }
               />
             ) : (
-              <NonEditableFieldNotice
+              <Input
                 id="task-date-debut"
-                value={task?.dateDebutDisplay ?? null}
-                message="La colonne associée à «Date début» n'est pas une date modifiable (elle est calculée). Associe ce champ à la véritable colonne de date dans la configuration du widget Grist."
+                disabled
+                readOnly
+                value={task?.dateDebutDisplay ?? ""}
               />
             )}
           </div>
@@ -715,16 +716,18 @@ function TaskFormPanel({
               <Input
                 id="task-date-fin"
                 type="date"
+                disabled={dateFinDisabled}
                 value={draft.dateFin}
                 onChange={(e) =>
                   setDraft((d) => ({ ...d, dateFin: e.target.value }))
                 }
               />
             ) : (
-              <NonEditableFieldNotice
+              <Input
                 id="task-date-fin"
-                value={task?.dateFinDisplay ?? null}
-                message="La colonne associée à «Date fin» n'est pas une date modifiable (elle est calculée). Associe ce champ à la véritable colonne de date dans la configuration du widget Grist."
+                disabled
+                readOnly
+                value={task?.dateFinDisplay ?? ""}
               />
             )}
           </div>
@@ -754,6 +757,7 @@ function TaskFormPanel({
               choices={gereParChoices}
               refOptions={gereParOptions}
               refLoading={gereParLoading}
+              disabled={gereParDisabled}
             />
           </div>
 
@@ -770,6 +774,7 @@ function TaskFormPanel({
               choices={typeChoices}
               refOptions={[]}
               refLoading={false}
+              disabled={typeDisabled}
             />
           </div>
 
@@ -874,7 +879,7 @@ function KanbanBoard({
   )
 
   const gereParFilterOptions = useMemo(
-    () => distinctFieldValues(tasks),
+    () => distinctValues(tasks.map((t) => t.gerePar)),
     [tasks]
   )
   const filteredTasks = useMemo(
@@ -894,12 +899,20 @@ function KanbanBoard({
     () => getStatutChoices(schemas.type),
     [schemas.type]
   )
+  const typeDisabled = useMemo(
+    () => isFormulaColumn(schemas.type),
+    [schemas.type]
+  )
   const gereParKind = useMemo(
     () => resolveFieldKind(schemas.gerePar),
     [schemas.gerePar]
   )
   const gereParChoices = useMemo(
     () => getStatutChoices(schemas.gerePar),
+    [schemas.gerePar]
+  )
+  const gereParDisabled = useMemo(
+    () => isFormulaColumn(schemas.gerePar),
     [schemas.gerePar]
   )
   const columns = useMemo(
@@ -911,6 +924,14 @@ function KanbanBoard({
     () => resolveFieldKind(schemas.campagne),
     [schemas.campagne]
   )
+  const campagneChoices = useMemo(
+    () => getStatutChoices(schemas.campagne),
+    [schemas.campagne]
+  )
+  const campagneDisabled = useMemo(
+    () => isFormulaColumn(schemas.campagne),
+    [schemas.campagne]
+  )
   const campagneTableId = useMemo(
     () => refTargetTableId(schemas.campagne),
     [schemas.campagne]
@@ -918,16 +939,32 @@ function KanbanBoard({
   const { options: campagneOptions, loading: campagneLoading } =
     useRefRecordOptions(w, campagneTableId)
   const campagneLabelById = useMemo(
-    () => new Map(campagneOptions.map((o) => [o.id, o.label])),
+    () => new Map(campagneOptions.map((o) => [String(o.id), o.label])),
     [campagneOptions]
+  )
+  // Free-text fallback (no real linked table): distinct values already used
+  // for Campagne across loaded tasks, offered as autocomplete suggestions --
+  // same idea as kanban2's own "reference" field, which had no true lookup
+  // table either.
+  const campagneSuggestions = useMemo(
+    () => distinctValues(tasks.map((t) => t.campagne)),
+    [tasks]
   )
 
   const dateDebutIsDate = useMemo(
     () => isDateLikeColumn(schemas.dateDebut),
     [schemas.dateDebut]
   )
+  const dateDebutDisabled = useMemo(
+    () => isFormulaColumn(schemas.dateDebut),
+    [schemas.dateDebut]
+  )
   const dateFinIsDate = useMemo(
     () => isDateLikeColumn(schemas.dateFin),
+    [schemas.dateFin]
+  )
+  const dateFinDisabled = useMemo(
+    () => isFormulaColumn(schemas.dateFin),
     [schemas.dateFin]
   )
 
@@ -1112,15 +1149,22 @@ function KanbanBoard({
             statutChoices={statutChoices}
             typeKind={typeKind}
             typeChoices={typeChoices}
+            typeDisabled={typeDisabled}
             campagneKind={campagneKind}
+            campagneChoices={campagneChoices}
             campagneOptions={campagneOptions}
             campagneLoading={campagneLoading}
+            campagneSuggestions={campagneSuggestions}
+            campagneDisabled={campagneDisabled}
             dateDebutIsDate={dateDebutIsDate}
+            dateDebutDisabled={dateDebutDisabled}
             dateFinIsDate={dateFinIsDate}
+            dateFinDisabled={dateFinDisabled}
             gereParKind={gereParKind}
             gereParChoices={gereParChoices}
             gereParOptions={gereParOptions}
             gereParLoading={gereParLoading}
+            gereParDisabled={gereParDisabled}
             onSave={async (patch) => {
               await saveTask(patch, panel.task?.id ?? null)
               setPanel(null)

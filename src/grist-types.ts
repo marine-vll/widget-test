@@ -15,15 +15,14 @@ export type TaskMapped = {
   /** Choice column driving the Kanban columns. */
   statut: string | null
   titre: string
-  /** Referenced row id in the linked table, or `null` when unset. */
-  campagne: number | null
   /**
-   * Set only when the column mapped to "Campagne" turns out not to be an
-   * actual Ref/RefList (e.g. a computed display column) -- the raw text so
-   * the card/form can still show *something* meaningful instead of a
-   * silently-blank reference field.
+   * "Campagne" — like the widget it replaces, the mapped column isn't
+   * required to be an actual Reference: it accepts Text, Choice, ChoiceList,
+   * Ref, or RefList (whatever the document actually has), normalized to a
+   * list of string values uniformly, same convention as `gerePar`.
+   * `[String(rowId)]` for a Ref/RefList (label resolved separately).
    */
-  campagneDisplay: string | null
+  campagne: string[]
   dateDebut: Date | null
   /** Raw text fallback when the mapped column isn't decodable as a date. */
   dateDebutDisplay: string | null
