@@ -63,7 +63,12 @@ export const GRIST_OPTIONS: UseGristOptions = {
   columns: [
     { name: "statut", title: "Statut", type: "Choice" },
     { name: "titre", title: "Titre", type: "Text" },
-    { name: "campagne", title: "Campagne", type: "Ref", optional: true },
+    {
+      name: "campagne",
+      title: "Campagne",
+      type: "Ref,RefList",
+      optional: true,
+    },
     {
       name: "dateDebut",
       title: "Date de début",
@@ -93,12 +98,12 @@ export const GRIST_OPTIONS: UseGristOptions = {
       optional: true,
     },
     { name: "creePar", title: "Créé par", type: "Text", optional: true },
-    // Type unknown ahead of time (Text, Choice, ChoiceList, or Ref
+    // Type unknown ahead of time (Text, Choice, ChoiceList, Ref, or RefList
     // depending on the document) — same adaptive treatment as `type`.
     {
       name: "gerePar",
       title: "Géré par l'équipe",
-      type: "Text,Choice,ChoiceList,Ref",
+      type: "Text,Choice,ChoiceList,Ref,RefList",
       optional: true,
     },
   ],
@@ -450,6 +455,41 @@ function AdaptiveMultiField({
           </option>
         ))}
       </Select>
+    )
+  }
+
+  if (kind === "reflist") {
+    return (
+      <div
+        role="group"
+        aria-labelledby={`${id}-label`}
+        className="flex flex-wrap gap-x-3 gap-y-1.5 pt-1"
+      >
+        {refOptions.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            {refLoading ? "Chargement…" : "Aucun élément disponible"}
+          </p>
+        ) : (
+          refOptions.map((opt) => {
+            const value = String(opt.id)
+            return (
+              <label key={opt.id} className="flex items-center gap-1.5 text-sm">
+                <Checkbox
+                  checked={values.includes(value)}
+                  onCheckedChange={(checked) =>
+                    onChange(
+                      checked === true
+                        ? [...values, value]
+                        : values.filter((v) => v !== value)
+                    )
+                  }
+                />
+                {opt.label}
+              </label>
+            )
+          })
+        )}
+      </div>
     )
   }
 

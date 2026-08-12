@@ -39,12 +39,15 @@ export function buildColumnSchemas(
  * documents, so the form adapts its control to whichever of these the
  * mapped column turns out to be.
  */
-export type FieldKind = "text" | "choice" | "choicelist" | "ref" | "unknown"
+export type FieldKind =
+  "text" | "choice" | "choicelist" | "ref" | "reflist" | "unknown"
 
 export function resolveFieldKind(schema?: GristReplicaColumn): FieldKind {
   if (!schema?.type) return "unknown"
   if (schema.type === "ChoiceList") return "choicelist"
   if (schema.type === "Choice") return "choice"
+  // Check RefList before Ref -- "RefList:X" does not start with "Ref:".
+  if (schema.type.startsWith("RefList:")) return "reflist"
   if (schema.type.startsWith("Ref:")) return "ref"
   return "text"
 }
@@ -64,12 +67,44 @@ function unwrapRef(value: unknown): number | null {
 }
 
 /**
- * Decode a cell whose column might be Text, Choice, ChoiceList, or Ref into
- * a uniform string list (`[]` unset, `[value]` scalar, full list for
- * ChoiceList, `[String(rowId)]` for Ref — label resolved separately).
- * Tolerates a value shape that doesn't match the declared kind (e.g. a
- * scalar Choice read where `ChoiceList` was expected) instead of dropping it
- * silently, since the two are easy to mix up when mapping a widget column.
+ * Decode a Ref *or* RefList cell into a single row id (the first linked
+ * record for a RefList) — the dedicated Campagne field keeps a single-select
+ * UI even when the underlying column technically allows several.
+ */
+function decodeRefValue(
+  raw: unknown,
+  schema: GristReplicaColumn | undefined
+): number | null {
+  const decoded = schema ? decodeGristValue(raw, schema) : raw
+  if (Array.isArray(decoded)) {
+    for (const item of decoded) {
+      const id = unwrapRef(item)
+      if (id != null) return id
+    }
+    return null
+  }
+  return unwrapRef(decoded)
+}
+
+/** Encode a single row id back to a Ref *or* RefList cell, matching the column's actual kind. */
+function encodeRefValue(
+  value: number | null,
+  schema: GristReplicaColumn | undefined
+): unknown {
+  if (resolveFieldKind(schema) === "reflist") {
+    return encodeGristValue(value != null ? [value] : [], schema)
+  }
+  return encodeGristValue(value, schema)
+}
+
+/**
+ * Decode a cell whose column might be Text, Choice, ChoiceList, Ref, or
+ * RefList into a uniform string list (`[]` unset, `[value]` scalar, full
+ * list for ChoiceList/RefList, `[String(rowId)]` for a single Ref — labels
+ * resolved separately). Tolerates a value shape that doesn't match the
+ * declared kind (e.g. a scalar Choice read where `ChoiceList` was expected)
+ * instead of dropping it silently, since the two are easy to mix up when
+ * mapping a widget column.
  */
 function decodeMultiValue(
   raw: unknown,
@@ -80,6 +115,13 @@ function decodeMultiValue(
   if (kind === "ref") {
     const rowId = unwrapRef(decoded)
     return rowId != null ? [String(rowId)] : []
+  }
+  if (kind === "reflist") {
+    if (!Array.isArray(decoded)) return []
+    return decoded
+      .map((v) => unwrapRef(v))
+      .filter((v): v is number => v != null)
+      .map(String)
   }
   if (Array.isArray(decoded)) return decoded.map((v) => String(v))
   if (decoded == null || decoded === "") return []
@@ -95,7 +137,55 @@ function encodeMultiValue(
   if (kind === "choicelist") return encodeGristValue(values, schema)
   if (kind === "ref")
     return encodeGristValue(values[0] ? Number(values[0]) : null, schema)
+  if (kind === "reflist")
+    return encodeGristValue(
+      values.map((v) => Number(v)).filter((n) => Number.isFinite(n)),
+      schema
+    )
   return values[0] ?? ""
+}
+
+/**
+ * Decode a Date/DateTime cell, tolerating shapes `decodeGristValue` doesn't
+ * already normalize to a `Date` (a raw epoch number when the column's type
+ * string didn't match exactly, or an ISO string) instead of giving up.
+ */
+function decodeDateValue(
+  raw: unknown,
+  schema: GristReplicaColumn | undefined
+): Date | null {
+  const decoded = schema ? decodeGristValue(raw, schema) : raw
+  if (decoded instanceof Date) return decoded
+  if (typeof decoded === "number" && Number.isFinite(decoded)) {
+    return new Date(decoded * 1000)
+  }
+  if (typeof decoded === "string" && decoded) {
+    const parsed = Date.parse(decoded)
+    if (!Number.isNaN(parsed)) return new Date(parsed)
+  }
+  return null
+}
+
+// Logged at most once per (logical field, real column) pair: a mapped
+// column whose real colId is simply absent from the row payload is the
+// signature of a mismatch between what Grist reports as mapped and what it
+// actually sends -- worth surfacing loudly rather than silently rendering
+// as an empty field indistinguishable from "no data".
+const warnedMissingColumns = new Set<string>()
+
+function warnIfColumnMissing(
+  logical: string,
+  real: string,
+  row: GristRowRecord<TaskRow>
+) {
+  const key = `${logical}:${real}`
+  if (warnedMissingColumns.has(key)) return
+  warnedMissingColumns.add(key)
+  console.warn(
+    `Kanban: la colonne mappée "${logical}" -> "${real}" est absente de la ligne Grist #${row.id}. ` +
+      `Clés reçues pour cette ligne :`,
+    Object.keys(row)
+  )
 }
 
 /**
@@ -113,23 +203,18 @@ export function mapTaskRow(
     for (const [logical, real] of Object.entries(mappings)) {
       if (typeof real !== "string") continue
       const raw = row[real]
+      if (raw === undefined) warnIfColumnMissing(logical, real, row)
       const schema = schemas[logical as keyof TaskMapped]
       switch (logical as keyof TaskMapped) {
         case "campagne":
-          mapped.campagne = unwrapRef(
-            schema ? decodeGristValue(raw, schema) : raw
-          )
+          mapped.campagne = decodeRefValue(raw, schema)
           break
-        case "dateDebut": {
-          const decoded = schema ? decodeGristValue(raw, schema) : raw
-          mapped.dateDebut = decoded instanceof Date ? decoded : null
+        case "dateDebut":
+          mapped.dateDebut = decodeDateValue(raw, schema)
           break
-        }
-        case "dateFin": {
-          const decoded = schema ? decodeGristValue(raw, schema) : raw
-          mapped.dateFin = decoded instanceof Date ? decoded : null
+        case "dateFin":
+          mapped.dateFin = decodeDateValue(raw, schema)
           break
-        }
         case "type":
           mapped.type = decodeMultiValue(raw, schema)
           break
@@ -172,7 +257,7 @@ export function encodeTaskPatch(
   if ("dateFin" in patch)
     out.dateFin = encodeGristValue(patch.dateFin, schemas.dateFin)
   if ("campagne" in patch)
-    out.campagne = encodeGristValue(patch.campagne, schemas.campagne)
+    out.campagne = encodeRefValue(patch.campagne ?? null, schemas.campagne)
   if ("type" in patch)
     out.type = encodeMultiValue(patch.type ?? [], schemas.type)
   if ("gerePar" in patch)
@@ -189,9 +274,14 @@ export function getStatutChoices(
 
 /** Target table id of a `Ref:TableName` column, or `null` if not a Ref column. */
 export function refTargetTableId(column?: GristReplicaColumn): string | null {
-  if (!column?.type?.startsWith("Ref:")) return null
-  const tableId = column.type.slice("Ref:".length)
-  return tableId || null
+  const type = column?.type
+  const prefix = type?.startsWith("RefList:")
+    ? "RefList:"
+    : type?.startsWith("Ref:")
+      ? "Ref:"
+      : null
+  if (!prefix || !type) return null
+  return type.slice(prefix.length) || null
 }
 
 const LABEL_HINTS = [

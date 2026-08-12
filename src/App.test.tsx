@@ -23,7 +23,12 @@ import {
   within,
 } from "grist-widget-sdk/emulator/testing"
 
-import { findUnmappedColumns, resolveDropTarget } from "@/lib/grist-kanban"
+import {
+  encodeTaskPatch,
+  findUnmappedColumns,
+  mapTaskRow,
+  resolveDropTarget,
+} from "@/lib/grist-kanban"
 
 import App, { GRIST_OPTIONS } from "./App"
 
@@ -331,6 +336,41 @@ describe("findUnmappedColumns", () => {
   it("returns nothing when every field has a real column", () => {
     const spec = [{ name: "statut", title: "Statut" }]
     expect(findUnmappedColumns({ statut: "STATUT" }, spec)).toEqual([])
+  })
+})
+
+describe("mapTaskRow / encodeTaskPatch", () => {
+  it("reads Campagne from a RefList column (not just a plain Ref)", () => {
+    // Some documents model a "linked to one or more records" column as
+    // RefList rather than Ref -- the dedicated single-select Campagne field
+    // should still show the first linked record instead of staying blank.
+    const task = mapTaskRow(
+      { id: 1, CAMPAGNE: [3, 5] },
+      { campagne: "CAMPAGNE" },
+      { campagne: { type: "RefList:Campagnes" } }
+    )
+    expect(task.campagne).toBe(3)
+  })
+
+  it("writes Campagne back as a list when the column is RefList", () => {
+    const fields = encodeTaskPatch(
+      { campagne: 7 },
+      { campagne: { type: "RefList:Campagnes" } }
+    )
+    expect(fields.campagne).toEqual(["L", 7])
+  })
+
+  it("decodes a Date cell even when no column schema is available yet", () => {
+    // buildColumnSchemas() can legitimately return `{}` for a render before
+    // the schema fetch resolves; the date should still come through as a
+    // real Date rather than silently dropping to null.
+    const epochSeconds = Math.floor(Date.UTC(2026, 2, 15) / 1000)
+    const task = mapTaskRow(
+      { id: 1, DATE_FIN: epochSeconds },
+      { dateFin: "DATE_FIN" },
+      {}
+    )
+    expect(task.dateFin).toEqual(new Date(epochSeconds * 1000))
   })
 })
 
