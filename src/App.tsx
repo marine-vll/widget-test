@@ -101,14 +101,12 @@ export const GRIST_OPTIONS: UseGristOptions = {
       optional: true,
     },
     { name: "creePar", title: "Créé par", type: "Text", optional: true },
-    // Type unknown ahead of time (Text, Choice, ChoiceList, Ref, or RefList
-    // depending on the document) — same adaptive treatment as `type`.
-    {
-      name: "gerePar",
-      title: "Géré par l'équipe",
-      type: "Text,Choice,ChoiceList,Ref,RefList",
-      optional: true,
-    },
+    // Filter-only fields, not part of the edit form -- Grist manages "Géré
+    // par l'équipe" entirely on its own now (default value / trigger
+    // formula), so the widget only ever reads it (and Campagne) to power the
+    // filter bar. No type restriction, same reasoning as `campagne` above.
+    { name: "filtreEquipe", title: "Filtre par équipe", optional: true },
+    { name: "filtreCampagne", title: "Filtre par campagne", optional: true },
   ],
 }
 
@@ -218,7 +216,6 @@ type Draft = {
   commentaires: string
   statut: string
   creePar: string
-  gerePar: string[]
 }
 
 function draftFromTask(task: Task | null, defaultStatut: string): Draft {
@@ -232,7 +229,6 @@ function draftFromTask(task: Task | null, defaultStatut: string): Draft {
     commentaires: task?.commentaires ?? "",
     statut: task?.statut ?? defaultStatut,
     creePar: task?.creePar ?? "",
-    gerePar: task?.gerePar ?? [],
   }
 }
 
@@ -369,6 +365,55 @@ function TaskCardOverlay({
         campagneLabel={campagneLabel}
         typeColorByValue={typeColorByValue}
       />
+    </div>
+  )
+}
+
+/** One row of toggleable filter pills ("Tous" + each distinct value) --
+ *  reused for both the équipe and campagne filters at the top of the board. */
+function FilterPillGroup({
+  label,
+  options,
+  active,
+  onChange,
+}: {
+  label: string
+  options: string[]
+  active: string | null
+  onChange: (value: string | null) => void
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+        {label}
+      </span>
+      <button
+        type="button"
+        onClick={() => onChange(null)}
+        className={cn(
+          "rounded-sm border px-2 py-0.5 text-xs",
+          active === null
+            ? "border-primary bg-accent text-accent-foreground"
+            : "border-border text-muted-foreground hover:bg-muted"
+        )}
+      >
+        Tous
+      </button>
+      {options.map((value) => (
+        <button
+          key={value}
+          type="button"
+          onClick={() => onChange(active === value ? null : value)}
+          className={cn(
+            "rounded-sm border px-2 py-0.5 text-xs",
+            active === value
+              ? "border-primary bg-accent text-accent-foreground"
+              : "border-border text-muted-foreground hover:bg-muted"
+          )}
+        >
+          {value}
+        </button>
+      ))}
     </div>
   )
 }
@@ -640,11 +685,6 @@ function TaskFormPanel({
   dateDebutDisabled,
   dateFinIsDate,
   dateFinDisabled,
-  gereParKind,
-  gereParChoices,
-  gereParOptions,
-  gereParLoading,
-  gereParDisabled,
   onSave,
   onDelete,
 }: {
@@ -665,11 +705,6 @@ function TaskFormPanel({
   dateDebutDisabled: boolean
   dateFinIsDate: boolean
   dateFinDisabled: boolean
-  gereParKind: FieldKind
-  gereParChoices: GristChoiceListEntry[]
-  gereParOptions: RefRecordOption[]
-  gereParLoading: boolean
-  gereParDisabled: boolean
   onSave: (patch: Partial<TaskMapped>) => Promise<void>
   onDelete?: () => Promise<void>
 }) {
@@ -728,9 +763,6 @@ function TaskFormPanel({
         ...(omitIfNewAndEmpty && !draft.creePar
           ? {}
           : { creePar: draft.creePar }),
-        ...(gereParDisabled || (omitIfNewAndEmpty && draft.gerePar.length === 0)
-          ? {}
-          : { gerePar: draft.gerePar }),
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -837,7 +869,7 @@ function TaskFormPanel({
             )}
           </div>
 
-          {/* Ligne 4 : Service responsable + Géré par l'équipe */}
+          {/* Ligne 4 : Service responsable + Type */}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="task-service">Service responsable</Label>
             <Input
@@ -849,25 +881,6 @@ function TaskFormPanel({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="task-gere-par" id="task-gere-par-label">
-              Géré par l'équipe
-            </Label>
-            <AdaptiveMultiField
-              id="task-gere-par"
-              kind={gereParKind}
-              values={draft.gerePar}
-              onChange={(values) =>
-                setDraft((d) => ({ ...d, gerePar: values }))
-              }
-              choices={gereParChoices}
-              refOptions={gereParOptions}
-              refLoading={gereParLoading}
-              disabled={gereParDisabled}
-            />
-          </div>
-
-          {/* Ligne 4bis : Type (pleine largeur — ne tenait pas à trois sur la ligne du dessus) */}
-          <div className="col-span-2 flex flex-col gap-1.5">
             <Label htmlFor="task-type" id="task-type-label">
               Type
             </Label>
@@ -973,7 +986,12 @@ function KanbanBoard({
 }) {
   const [panel, setPanel] = useState<PanelState | null>(null)
   const [activeTask, setActiveTask] = useState<Task | null>(null)
-  const [activeFilter, setActiveFilter] = useState<string | null>(null)
+  const [activeEquipeFilter, setActiveEquipeFilter] = useState<string | null>(
+    null
+  )
+  const [activeCampagneFilter, setActiveCampagneFilter] = useState<
+    string | null
+  >(null)
 
   const tasks = useMemo(
     () =>
@@ -983,16 +1001,24 @@ function KanbanBoard({
     [w.records, w.recordsMappings, schemas]
   )
 
-  const gereParFilterOptions = useMemo(
-    () => distinctValues(tasks.map((t) => t.gerePar)),
+  const filtreEquipeOptions = useMemo(
+    () => distinctValues(tasks.map((t) => t.filtreEquipe)),
+    [tasks]
+  )
+  const filtreCampagneOptions = useMemo(
+    () => distinctValues(tasks.map((t) => t.filtreCampagne)),
     [tasks]
   )
   const filteredTasks = useMemo(
     () =>
-      activeFilter
-        ? tasks.filter((t) => t.gerePar.includes(activeFilter))
-        : tasks,
-    [tasks, activeFilter]
+      tasks.filter(
+        (t) =>
+          (!activeEquipeFilter ||
+            t.filtreEquipe.includes(activeEquipeFilter)) &&
+          (!activeCampagneFilter ||
+            t.filtreCampagne.includes(activeCampagneFilter))
+      ),
+    [tasks, activeEquipeFilter, activeCampagneFilter]
   )
 
   const statutChoices = useMemo(
@@ -1013,18 +1039,6 @@ function KanbanBoard({
   const typeDisabled = useMemo(
     () => isFormulaColumn(schemas.type),
     [schemas.type]
-  )
-  const gereParKind = useMemo(
-    () => resolveFieldKind(schemas.gerePar),
-    [schemas.gerePar]
-  )
-  const gereParChoices = useMemo(
-    () => getStatutChoices(schemas.gerePar),
-    [schemas.gerePar]
-  )
-  const gereParDisabled = useMemo(
-    () => isFormulaColumn(schemas.gerePar),
-    [schemas.gerePar]
   )
   const columns = useMemo(
     () => buildColumns(statutChoices, filteredTasks),
@@ -1079,13 +1093,6 @@ function KanbanBoard({
     [schemas.dateFin]
   )
 
-  const gereParTableId = useMemo(
-    () => refTargetTableId(schemas.gerePar),
-    [schemas.gerePar]
-  )
-  const { options: gereParOptions, loading: gereParLoading } =
-    useRefRecordOptions(w, gereParTableId)
-
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -1135,11 +1142,11 @@ function KanbanBoard({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-muted/30">
-      <header className="flex items-center justify-between border-b border-border bg-background px-4 py-3">
+      <header className="grid grid-cols-[1fr_auto_1fr] items-center border-b border-border bg-background px-4 py-3">
         <h1 className="text-sm font-medium text-foreground">Tâches</h1>
         <Button
           size="sm"
-          className="justify-center text-sm"
+          className="justify-self-center text-sm"
           onClick={() =>
             setPanel({
               mode: "new",
@@ -1151,6 +1158,7 @@ function KanbanBoard({
           <Plus className="size-4" />
           Ajouter une action
         </Button>
+        <span aria-hidden="true" />
       </header>
 
       {unmappedColumns.length > 0 ? (
@@ -1165,40 +1173,24 @@ function KanbanBoard({
         </p>
       ) : null}
 
-      {gereParFilterOptions.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-1.5 border-b border-border bg-background px-4 py-2">
-          <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-            Géré par
-          </span>
-          <button
-            type="button"
-            onClick={() => setActiveFilter(null)}
-            className={cn(
-              "rounded-sm border px-2 py-0.5 text-xs",
-              activeFilter === null
-                ? "border-primary bg-accent text-accent-foreground"
-                : "border-border text-muted-foreground hover:bg-muted"
-            )}
-          >
-            Tous
-          </button>
-          {gereParFilterOptions.map((value) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() =>
-                setActiveFilter((cur) => (cur === value ? null : value))
-              }
-              className={cn(
-                "rounded-sm border px-2 py-0.5 text-xs",
-                activeFilter === value
-                  ? "border-primary bg-accent text-accent-foreground"
-                  : "border-border text-muted-foreground hover:bg-muted"
-              )}
-            >
-              {value}
-            </button>
-          ))}
+      {filtreEquipeOptions.length > 0 || filtreCampagneOptions.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-border bg-background px-4 py-2">
+          {filtreEquipeOptions.length > 0 ? (
+            <FilterPillGroup
+              label="Équipe"
+              options={filtreEquipeOptions}
+              active={activeEquipeFilter}
+              onChange={setActiveEquipeFilter}
+            />
+          ) : null}
+          {filtreCampagneOptions.length > 0 ? (
+            <FilterPillGroup
+              label="Campagne"
+              options={filtreCampagneOptions}
+              active={activeCampagneFilter}
+              onChange={setActiveCampagneFilter}
+            />
+          ) : null}
         </div>
       ) : null}
 
@@ -1274,11 +1266,6 @@ function KanbanBoard({
             dateDebutDisabled={dateDebutDisabled}
             dateFinIsDate={dateFinIsDate}
             dateFinDisabled={dateFinDisabled}
-            gereParKind={gereParKind}
-            gereParChoices={gereParChoices}
-            gereParOptions={gereParOptions}
-            gereParLoading={gereParLoading}
-            gereParDisabled={gereParDisabled}
             onSave={async (patch) => {
               await saveTask(patch, panel.task?.id ?? null)
               setPanel(null)

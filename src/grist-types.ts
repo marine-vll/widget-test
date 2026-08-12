@@ -19,8 +19,8 @@ export type TaskMapped = {
    * "Campagne" — like the widget it replaces, the mapped column isn't
    * required to be an actual Reference: it accepts Text, Choice, ChoiceList,
    * Ref, or RefList (whatever the document actually has), normalized to a
-   * list of string values uniformly, same convention as `gerePar`.
-   * `[String(rowId)]` for a Ref/RefList (label resolved separately).
+   * list of string values uniformly. `[String(rowId)]` for a Ref/RefList
+   * (label resolved separately).
    */
   campagne: string[]
   dateDebut: Date | null
@@ -34,11 +34,12 @@ export type TaskMapped = {
   commentaires: string
   creePar: string
   /**
-   * "Géré par l'équipe" — column type isn't fixed (Text, Choice, ChoiceList,
-   * or Ref, depending on how each document set it up), so it's normalized to
-   * a list of string values uniformly: `[]` unset, `[value]` for a scalar,
-   * the full list for a ChoiceList, `[String(rowId)]` for a Ref (label
-   * resolved separately, same as `campagne`).
+   * Read-only, filter-only fields (not part of the edit form -- "Géré par
+   * l'équipe" is entirely Grist-managed now, via its own default value /
+   * trigger formula, so the widget only ever reads it to power the filter
+   * bar, never writes to it). Same uniform string-list decoding as
+   * `campagne`.
    */
-  gerePar: string[]
+  filtreEquipe: string[]
+  filtreCampagne: string[]
 }

@@ -35,9 +35,9 @@ export function buildColumnSchemas(
 
 /**
  * What shape a column's values actually take. A handful of fields (Type,
- * "Géré par l'équipe") aren't pinned to one Grist column type across
- * documents, so the form adapts its control to whichever of these the
- * mapped column turns out to be.
+ * Campagne) aren't pinned to one Grist column type across documents, so the
+ * form adapts its control to whichever of these the mapped column turns out
+ * to be.
  */
 export type FieldKind =
   "text" | "choice" | "choicelist" | "ref" | "reflist" | "unknown"
@@ -304,9 +304,9 @@ export function mapTaskRow(
       switch (logical as keyof TaskMapped) {
         case "campagne": {
           // Not required to be an actual Reference (same convention as
-          // Type / Géré par l'équipe, and the widget this one replaces):
-          // whatever the mapped column turns out to be, decodeMultiValue
-          // normalizes it to a uniform string list.
+          // Type, and the widget this one replaces): whatever the mapped
+          // column turns out to be, decodeMultiValue normalizes it to a
+          // uniform string list.
           const decoded = decodeMultiValue(raw, schema)
           warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
           mapped.campagne = decoded
@@ -334,10 +334,16 @@ export function mapTaskRow(
           mapped.type = decoded
           break
         }
-        case "gerePar": {
+        case "filtreEquipe": {
           const decoded = decodeMultiValue(raw, schema)
           warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
-          mapped.gerePar = decoded
+          mapped.filtreEquipe = decoded
+          break
+        }
+        case "filtreCampagne": {
+          const decoded = decodeMultiValue(raw, schema)
+          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
+          mapped.filtreCampagne = decoded
           break
         }
         default: {
@@ -361,7 +367,8 @@ export function mapTaskRow(
     type: mapped.type ?? [],
     commentaires: mapped.commentaires ?? "",
     creePar: mapped.creePar ?? "",
-    gerePar: mapped.gerePar ?? [],
+    filtreEquipe: mapped.filtreEquipe ?? [],
+    filtreCampagne: mapped.filtreCampagne ?? [],
   }
 }
 
@@ -394,11 +401,6 @@ export function encodeTaskPatch(
       case "type": {
         const encoded = encodeMultiValue(value as string[], schemas.type)
         if (encoded !== undefined) out.type = encoded
-        break
-      }
-      case "gerePar": {
-        const encoded = encodeMultiValue(value as string[], schemas.gerePar)
-        if (encoded !== undefined) out.gerePar = encoded
         break
       }
       default:
@@ -610,10 +612,11 @@ export function findUnmappedColumns(
 
 /**
  * Distinct, non-empty values across a set of multi-value fields (e.g. every
- * task's `gerePar`, or every task's `campagne`) — used both for filter pills
- * and as free-text autocomplete suggestions (kanban2's own "reference"
- * field offered a datalist over the column's existing values rather than a
- * real foreign-key lookup; same idea here for a Text/Any-typed column).
+ * task's `filtreEquipe`, or every task's `campagne`) — used both for filter
+ * pills and as free-text autocomplete suggestions (kanban2's own
+ * "reference" field offered a datalist over the column's existing values
+ * rather than a real foreign-key lookup; same idea here for a Text/Any-typed
+ * column).
  */
 export function distinctValues(lists: Iterable<string[]>): string[] {
   const seen = new Set<string>()

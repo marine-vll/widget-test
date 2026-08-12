@@ -70,13 +70,18 @@ function kanbanFixture(): GristReplicaDocument {
           },
           COMMENTAIRES: { type: "Text", label: "Commentaires" },
           CREE_PAR: { type: "Text", label: "Créé par" },
-          // Modeled as a single Choice here (as opposed to TYPE's ChoiceList)
-          // specifically to exercise the adaptive field's "choice" branch —
-          // real documents may map either shape to this logical field.
-          GERE_PAR: {
+          // Read-only filter fields -- entirely separate real columns from
+          // "Campagne" above (that one stays an editable form field); these
+          // two exist only to power the filter bar and are never written to.
+          FILTRE_EQUIPE: {
             type: "Choice",
-            label: "Géré par l'équipe",
+            label: "Filtre par équipe",
             widgetOptions: { choices: ["Équipe A", "Équipe B"] },
+          },
+          FILTRE_CAMPAGNE: {
+            type: "Choice",
+            label: "Filtre par campagne",
+            widgetOptions: { choices: ["Campagne Alpha", "Campagne Beta"] },
           },
         },
         rows: [
@@ -91,7 +96,8 @@ function kanbanFixture(): GristReplicaDocument {
             TYPE: ["Réunion"],
             COMMENTAIRES: "",
             CREE_PAR: "Marine",
-            GERE_PAR: "Équipe A",
+            FILTRE_EQUIPE: "Équipe A",
+            FILTRE_CAMPAGNE: "Campagne Alpha",
           },
           {
             id: 2,
@@ -104,7 +110,8 @@ function kanbanFixture(): GristReplicaDocument {
             TYPE: [],
             COMMENTAIRES: "",
             CREE_PAR: "",
-            GERE_PAR: "",
+            FILTRE_EQUIPE: "Équipe B",
+            FILTRE_CAMPAGNE: "Campagne Beta",
           },
         ],
       },
@@ -130,7 +137,8 @@ const MAPPINGS = {
   type: "TYPE",
   commentaires: "COMMENTAIRES",
   creePar: "CREE_PAR",
-  gerePar: "GERE_PAR",
+  filtreEquipe: "FILTRE_EQUIPE",
+  filtreCampagne: "FILTRE_CAMPAGNE",
 }
 
 // Reproduces the live bug report: "Campagne" mapped to "Campagne_Nom", a
@@ -244,9 +252,9 @@ describe("App", () => {
       emulator: { document: kanbanFixture() },
     })
     // Only Statut/Titre mapped -- every optional field (Campagne, dates,
-    // Service, Type, Créé par, Géré par) is left unset, exactly like a
-    // widget instance whose config panel was never fully filled in. This is
-    // the scenario that makes those fields read as empty even though the
+    // Service, Type, Créé par, les deux filtres) is left unset, exactly like
+    // a widget instance whose config panel was never fully filled in. This
+    // is the scenario that makes those fields read as empty even though the
     // underlying Grist columns have data.
     emulator.setColumnMappings({ statut: "STATUT", titre: "TITRE" })
 
@@ -256,7 +264,8 @@ describe("App", () => {
     const notice = screen.getByText(/pas encore associées/).closest("p")!
     expect(notice).toHaveTextContent("Campagne")
     expect(notice).toHaveTextContent("Créé par")
-    expect(notice).toHaveTextContent("Géré par l'équipe")
+    expect(notice).toHaveTextContent("Filtre par équipe")
+    expect(notice).toHaveTextContent("Filtre par campagne")
   })
 
   it("builds one Kanban column per Statut choice and sorts cards into them", async () => {
@@ -300,12 +309,10 @@ describe("App", () => {
     // Ligne 3 : dates
     expect(screen.getByLabelText("Date début")).toHaveValue("2026-01-05")
     expect(screen.getByLabelText("Date fin")).toHaveValue("2026-01-10")
-    // Ligne 4 : service + géré par l'équipe
+    // Ligne 4 : service + type (choice list -> cases à cocher)
     expect(screen.getByLabelText("Service responsable")).toHaveValue(
       "Communication"
     )
-    expect(screen.getByLabelText("Géré par l'équipe")).toHaveValue("Équipe A")
-    // Ligne 4bis : type (choice list -> cases à cocher)
     expect(screen.getByRole("checkbox", { name: "Réunion" })).toBeChecked()
     expect(
       screen.getByRole("checkbox", { name: "Formation" })
@@ -352,7 +359,8 @@ describe("App", () => {
     // user, or "Géré par l'équipe" from their default team) when the field
     // is missing from the action. Sending it blank would override that
     // default and could even trip an access rule keyed on it always being
-    // set (`not rec.Gere_par_l_equipe`, seen live).
+    // set (`not rec.Gere_par_l_equipe`, seen live). The two filter fields are
+    // never part of the form at all, so they must never appear either.
     const { emulator } = renderBoard()
 
     await waitFor(() => screen.getByText("Ajouter une action"))
@@ -374,42 +382,19 @@ describe("App", () => {
       const fields = added![3]
       expect(fields.TITRE).toBe("Nouvelle campagne presse")
       expect(fields.STATUT).toBe("A faire")
-      expect(fields).not.toHaveProperty("GERE_PAR")
       expect(fields).not.toHaveProperty("CREE_PAR")
+      expect(fields).not.toHaveProperty("FILTRE_EQUIPE")
+      expect(fields).not.toHaveProperty("FILTRE_CAMPAGNE")
     })
   })
 
-  it("still sends Géré par l'équipe on creation when the user did pick one", async () => {
-    const { emulator } = renderBoard()
-
-    await waitFor(() => screen.getByText("Ajouter une action"))
-    fireEvent.click(screen.getByText("Ajouter une action"))
-
-    await waitFor(() => screen.getByLabelText("Titre"))
-    fireEvent.change(screen.getByLabelText("Titre"), {
-      target: { value: "Avec équipe" },
-    })
-    fireEvent.change(screen.getByLabelText("Géré par l'équipe"), {
-      target: { value: "Équipe A" },
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
-    })
-
-    await waitFor(() => {
-      const added = actionsOf(emulator).find(
-        (a) => a[0] === "AddRecord" && a[1] === "Tasks"
-      ) as [string, string, null, Record<string, unknown>] | undefined
-      expect(added?.[3].GERE_PAR).toBe("Équipe A")
-    })
-  })
-
-  it("filters cards by Géré par l'équipe", async () => {
+  it("filters cards by équipe and by campagne independently, combined with AND", async () => {
     renderBoard()
 
     await waitFor(() => screen.getByText("Préparer le kickoff"))
     expect(screen.getByText("Rédiger le bilan")).toBeInTheDocument()
 
+    // Équipe filter alone.
     fireEvent.click(screen.getByRole("button", { name: "Équipe A" }))
     await waitFor(() =>
       expect(screen.queryByText("Rédiger le bilan")).not.toBeInTheDocument()
@@ -421,6 +406,52 @@ describe("App", () => {
     await waitFor(() =>
       expect(screen.getByText("Rédiger le bilan")).toBeInTheDocument()
     )
+
+    // Campagne filter alone, independent of équipe.
+    fireEvent.click(screen.getByRole("button", { name: "Campagne Beta" }))
+    await waitFor(() =>
+      expect(screen.queryByText("Préparer le kickoff")).not.toBeInTheDocument()
+    )
+    expect(screen.getByText("Rédiger le bilan")).toBeInTheDocument()
+
+    // Combining both filters is an AND: this task matches neither.
+    fireEvent.click(screen.getByRole("button", { name: "Équipe A" }))
+    await waitFor(() => {
+      expect(screen.queryByText("Préparer le kickoff")).not.toBeInTheDocument()
+      expect(screen.queryByText("Rédiger le bilan")).not.toBeInTheDocument()
+    })
+  })
+
+  it("never writes the filter-only fields back to Grist", async () => {
+    const { emulator } = renderBoard()
+
+    await waitFor(() => screen.getByText("Préparer le kickoff"))
+    fireEvent.click(screen.getByText("Préparer le kickoff"))
+    await waitFor(() =>
+      expect(screen.getByLabelText("Titre")).toHaveValue("Préparer le kickoff")
+    )
+
+    // Not part of the form at all.
+    expect(screen.queryByLabelText("Filtre par équipe")).not.toBeInTheDocument()
+    expect(
+      screen.queryByLabelText("Filtre par campagne")
+    ).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText("Titre"), {
+      target: { value: "Préparer le kickoff (v2)" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
+    })
+
+    await waitFor(() => {
+      const [, , , fields] = actionsOf(emulator).find(
+        (a) => a[0] === "UpdateRecord" && a[2] === 1
+      ) as [string, string, number, Record<string, unknown>]
+      expect(fields.TITRE).toBe("Préparer le kickoff (v2)")
+      expect(fields).not.toHaveProperty("FILTRE_EQUIPE")
+      expect(fields).not.toHaveProperty("FILTRE_CAMPAGNE")
+    })
   })
 
   it("shows Campagne as a #tag badge on the card when it's plain text (e.g. a computed column)", async () => {
