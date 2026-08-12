@@ -1,6 +1,7 @@
 import { useMemo, useState, type FormEvent } from "react"
 import {
   DndContext,
+  DragOverlay,
   KeyboardSensor,
   PointerSensor,
   closestCorners,
@@ -8,6 +9,7 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragStartEvent,
 } from "@dnd-kit/core"
 import {
   SortableContext,
@@ -36,13 +38,17 @@ import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { Textarea } from "@/components/ui/textarea"
 import {
   buildColumnSchemas,
+  distinctFieldValues,
   encodeTaskPatch,
   getStatutChoices,
   mapTaskRow,
   refTargetTableId,
   resolveDropTarget,
+  resolveFieldKind,
   UNASSIGNED_STATUS,
   useRefRecordOptions,
+  withSelectedFallback,
+  type FieldKind,
   type RefRecordOption,
   type TaskColumnSchemas,
 } from "@/lib/grist-kanban"
@@ -74,7 +80,10 @@ export const GRIST_OPTIONS: UseGristOptions = {
       type: "Text",
       optional: true,
     },
-    { name: "type", title: "Type", type: "ChoiceList", optional: true },
+    // Accepts either shape: some documents model "Type" as a single Choice,
+    // others as a multi-value Choice List — the form adapts (see
+    // `resolveFieldKind` / `AdaptiveMultiField`), so both map cleanly here.
+    { name: "type", title: "Type", type: "Choice,ChoiceList", optional: true },
     {
       name: "commentaires",
       title: "Commentaires",
@@ -82,6 +91,14 @@ export const GRIST_OPTIONS: UseGristOptions = {
       optional: true,
     },
     { name: "creePar", title: "Créé par", type: "Text", optional: true },
+    // Type unknown ahead of time (Text, Choice, ChoiceList, or Ref
+    // depending on the document) — same adaptive treatment as `type`.
+    {
+      name: "gerePar",
+      title: "Géré par l'équipe",
+      type: "Text,Choice,ChoiceList,Ref",
+      optional: true,
+    },
   ],
 }
 
@@ -164,6 +181,7 @@ type Draft = {
   commentaires: string
   statut: string
   creePar: string
+  gerePar: string[]
 }
 
 function draftFromTask(task: Task | null, defaultStatut: string): Draft {
@@ -177,10 +195,65 @@ function draftFromTask(task: Task | null, defaultStatut: string): Draft {
     commentaires: task?.commentaires ?? "",
     statut: task?.statut ?? defaultStatut,
     creePar: task?.creePar ?? "",
+    gerePar: task?.gerePar ?? [],
   }
 }
 
-function TaskCard({ task, onOpen }: { task: Task; onOpen: () => void }) {
+/** Presentational-only card body, reused by the sortable card and its DragOverlay clone. */
+function TaskCardContent({
+  task,
+  campagneLabel,
+}: {
+  task: Task
+  campagneLabel: string | null
+}) {
+  return (
+    <>
+      <p className="font-medium text-foreground">
+        {task.titre || "(Sans titre)"}
+      </p>
+      {campagneLabel || task.service || task.dateFin ? (
+        <dl className="mt-1.5 flex flex-col gap-0.5 text-xs text-muted-foreground">
+          {campagneLabel ? (
+            <div className="flex gap-1">
+              <dt className="shrink-0">Campagne :</dt>
+              <dd className="truncate">{campagneLabel}</dd>
+            </div>
+          ) : null}
+          {task.service ? (
+            <div className="flex gap-1">
+              <dt className="shrink-0">Service :</dt>
+              <dd className="truncate">{task.service}</dd>
+            </div>
+          ) : null}
+          {task.dateFin ? (
+            <div className="flex gap-1">
+              <dt className="shrink-0">Échéance :</dt>
+              <dd>{formatDate(task.dateFin)}</dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
+      {task.type.length > 0 ? (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {task.type.map((t) => (
+            <Badge key={t}>{t}</Badge>
+          ))}
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+function TaskCard({
+  task,
+  campagneLabel,
+  onOpen,
+}: {
+  task: Task
+  campagneLabel: string | null
+  onOpen: () => void
+}) {
   const {
     attributes,
     listeners,
@@ -205,33 +278,38 @@ function TaskCard({ task, onOpen }: { task: Task; onOpen: () => void }) {
       }}
       className={cn(
         "cursor-grab rounded-md border border-border bg-card p-2.5 text-left text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-        isDragging && "opacity-50"
+        isDragging && "opacity-40"
       )}
     >
-      <p className="font-medium text-foreground">
-        {task.titre || "(Sans titre)"}
-      </p>
-      {task.type.length > 0 ? (
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {task.type.map((t) => (
-            <Badge key={t}>{t}</Badge>
-          ))}
-        </div>
-      ) : null}
-      {task.dateFin ? (
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          Échéance : {formatDate(task.dateFin)}
-        </p>
-      ) : null}
+      <TaskCardContent task={task} campagneLabel={campagneLabel} />
+    </div>
+  )
+}
+
+/** Floating clone that follows the pointer during a drag (see `DragOverlay` in `KanbanBoard`).
+ *  Without this, the dragged card stays visually clipped by its own column's
+ *  scroll container while crossing into another column — the "saccadé" feel. */
+function TaskCardOverlay({
+  task,
+  campagneLabel,
+}: {
+  task: Task
+  campagneLabel: string | null
+}) {
+  return (
+    <div className="cursor-grabbing rounded-md border border-primary bg-card p-2.5 text-left text-sm shadow-lg">
+      <TaskCardContent task={task} campagneLabel={campagneLabel} />
     </div>
   )
 }
 
 function KanbanColumn({
   column,
+  campagneLabelById,
   onOpenTask,
 }: {
   column: ColumnData
+  campagneLabelById: Map<number, string>
   onOpenTask: (task: Task) => void
 }) {
   const { setNodeRef, isOver } = useDroppable({
@@ -243,7 +321,7 @@ function KanbanColumn({
     <div
       ref={setNodeRef}
       className={cn(
-        "flex w-72 shrink-0 flex-col rounded-md border border-border bg-background",
+        "flex w-96 shrink-0 flex-col rounded-md border border-border bg-background",
         isOver && "border-primary ring-1 ring-primary"
       )}
     >
@@ -265,6 +343,12 @@ function KanbanColumn({
               <TaskCard
                 key={task.id}
                 task={task}
+                campagneLabel={
+                  task.campagne != null
+                    ? (campagneLabelById.get(task.campagne) ??
+                      `#${task.campagne}`)
+                    : null
+                }
                 onOpen={() => onOpenTask(task)}
               />
             ))
@@ -275,13 +359,120 @@ function KanbanColumn({
   )
 }
 
+/**
+ * A field whose Grist column type isn't fixed across documents (Type, "Géré
+ * par l'équipe"): renders a text input, a single select, a checkbox group,
+ * or a Ref select, depending on what the mapped column actually turned out
+ * to be (`resolveFieldKind`).
+ */
+function AdaptiveMultiField({
+  id,
+  kind,
+  values,
+  onChange,
+  choices,
+  refOptions,
+  refLoading,
+}: {
+  id: string
+  kind: FieldKind
+  values: string[]
+  onChange: (values: string[]) => void
+  choices: GristChoiceListEntry[]
+  refOptions: RefRecordOption[]
+  refLoading: boolean
+}) {
+  if (kind === "choicelist") {
+    return (
+      <div
+        role="group"
+        aria-labelledby={`${id}-label`}
+        className="flex flex-wrap gap-x-3 gap-y-1.5 pt-1"
+      >
+        {choices.length === 0 ? (
+          <p className="text-xs text-muted-foreground">Aucun choix configuré</p>
+        ) : (
+          choices.map((choice) => (
+            <label
+              key={choice.value}
+              className="flex items-center gap-1.5 text-sm"
+            >
+              <Checkbox
+                checked={values.includes(choice.value)}
+                onCheckedChange={(checked) =>
+                  onChange(
+                    checked === true
+                      ? [...values, choice.value]
+                      : values.filter((v) => v !== choice.value)
+                  )
+                }
+              />
+              {choice.label}
+            </label>
+          ))
+        )}
+      </div>
+    )
+  }
+
+  if (kind === "choice") {
+    return (
+      <Select
+        id={id}
+        value={values[0] ?? ""}
+        onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
+      >
+        <option value="">—</option>
+        {choices.map((choice) => (
+          <option key={choice.value} value={choice.value}>
+            {choice.label}
+          </option>
+        ))}
+      </Select>
+    )
+  }
+
+  if (kind === "ref") {
+    const selectedId = values[0] ? Number(values[0]) : null
+    const options = withSelectedFallback(refOptions, selectedId, refLoading)
+    return (
+      <Select
+        id={id}
+        value={selectedId != null ? String(selectedId) : ""}
+        onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
+      >
+        <option value="">—</option>
+        {options.map((opt) => (
+          <option key={opt.id} value={opt.id}>
+            {opt.label}
+          </option>
+        ))}
+      </Select>
+    )
+  }
+
+  return (
+    <Input
+      id={id}
+      value={values[0] ?? ""}
+      onChange={(e) => onChange(e.target.value ? [e.target.value] : [])}
+    />
+  )
+}
+
 function TaskFormPanel({
   mode,
   task,
   defaultStatut,
   statutChoices,
+  typeKind,
   typeChoices,
   campagneOptions,
+  campagneLoading,
+  gereParKind,
+  gereParChoices,
+  gereParOptions,
+  gereParLoading,
   onSave,
   onDelete,
 }: {
@@ -289,8 +480,14 @@ function TaskFormPanel({
   task: Task | null
   defaultStatut: string
   statutChoices: GristChoiceListEntry[]
+  typeKind: FieldKind
   typeChoices: GristChoiceListEntry[]
   campagneOptions: RefRecordOption[]
+  campagneLoading: boolean
+  gereParKind: FieldKind
+  gereParChoices: GristChoiceListEntry[]
+  gereParOptions: RefRecordOption[]
+  gereParLoading: boolean
   onSave: (patch: Partial<TaskMapped>) => Promise<void>
   onDelete?: () => Promise<void>
 }) {
@@ -301,13 +498,6 @@ function TaskFormPanel({
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const busy = saving || deleting
-
-  function toggleType(value: string, checked: boolean) {
-    setDraft((d) => ({
-      ...d,
-      type: checked ? [...d.type, value] : d.type.filter((v) => v !== value),
-    }))
-  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
@@ -324,6 +514,7 @@ function TaskFormPanel({
         commentaires: draft.commentaires,
         statut: draft.statut,
         creePar: draft.creePar,
+        gerePar: draft.gerePar,
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -364,7 +555,11 @@ function TaskFormPanel({
               }
             >
               <option value="">—</option>
-              {campagneOptions.map((opt) => (
+              {withSelectedFallback(
+                campagneOptions,
+                draft.campagne,
+                campagneLoading
+              ).map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {opt.label}
                 </option>
@@ -409,7 +604,7 @@ function TaskFormPanel({
             />
           </div>
 
-          {/* Ligne 4 : Service responsable + Type */}
+          {/* Ligne 4 : Service responsable + Géré par l'équipe */}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="task-service">Service responsable</Label>
             <Input
@@ -421,35 +616,36 @@ function TaskFormPanel({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            <Label htmlFor="task-gere-par" id="task-gere-par-label">
+              Géré par l'équipe
+            </Label>
+            <AdaptiveMultiField
+              id="task-gere-par"
+              kind={gereParKind}
+              values={draft.gerePar}
+              onChange={(values) =>
+                setDraft((d) => ({ ...d, gerePar: values }))
+              }
+              choices={gereParChoices}
+              refOptions={gereParOptions}
+              refLoading={gereParLoading}
+            />
+          </div>
+
+          {/* Ligne 4bis : Type (pleine largeur — ne tenait pas à trois sur la ligne du dessus) */}
+          <div className="col-span-2 flex flex-col gap-1.5">
+            <Label htmlFor="task-type" id="task-type-label">
               Type
-            </span>
-            <div
-              role="group"
-              aria-label="Type"
-              className="flex flex-wrap gap-x-3 gap-y-1.5 pt-1"
-            >
-              {typeChoices.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  Aucun choix configuré
-                </p>
-              ) : (
-                typeChoices.map((choice) => (
-                  <label
-                    key={choice.value}
-                    className="flex items-center gap-1.5 text-sm"
-                  >
-                    <Checkbox
-                      checked={draft.type.includes(choice.value)}
-                      onCheckedChange={(checked) =>
-                        toggleType(choice.value, checked === true)
-                      }
-                    />
-                    {choice.label}
-                  </label>
-                ))
-              )}
-            </div>
+            </Label>
+            <AdaptiveMultiField
+              id="task-type"
+              kind={typeKind}
+              values={draft.type}
+              onChange={(values) => setDraft((d) => ({ ...d, type: values }))}
+              choices={typeChoices}
+              refOptions={[]}
+              refLoading={false}
+            />
           </div>
 
           {/* Ligne 5 : Commentaires */}
@@ -533,6 +729,8 @@ type PanelState = {
 
 function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
   const [panel, setPanel] = useState<PanelState | null>(null)
+  const [activeTask, setActiveTask] = useState<Task | null>(null)
+  const [activeFilter, setActiveFilter] = useState<string | null>(null)
 
   const tasks = useMemo(
     () =>
@@ -542,24 +740,57 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
     [w.records, w.recordsMappings, schemas]
   )
 
+  const gereParFilterOptions = useMemo(
+    () => distinctFieldValues(tasks),
+    [tasks]
+  )
+  const filteredTasks = useMemo(
+    () =>
+      activeFilter
+        ? tasks.filter((t) => t.gerePar.includes(activeFilter))
+        : tasks,
+    [tasks, activeFilter]
+  )
+
   const statutChoices = useMemo(
     () => getStatutChoices(schemas.statut),
     [schemas.statut]
   )
+  const typeKind = useMemo(() => resolveFieldKind(schemas.type), [schemas.type])
   const typeChoices = useMemo(
     () => getStatutChoices(schemas.type),
     [schemas.type]
   )
+  const gereParKind = useMemo(
+    () => resolveFieldKind(schemas.gerePar),
+    [schemas.gerePar]
+  )
+  const gereParChoices = useMemo(
+    () => getStatutChoices(schemas.gerePar),
+    [schemas.gerePar]
+  )
   const columns = useMemo(
-    () => buildColumns(statutChoices, tasks),
-    [statutChoices, tasks]
+    () => buildColumns(statutChoices, filteredTasks),
+    [statutChoices, filteredTasks]
   )
 
   const campagneTableId = useMemo(
     () => refTargetTableId(schemas.campagne),
     [schemas.campagne]
   )
-  const { options: campagneOptions } = useRefRecordOptions(w, campagneTableId)
+  const { options: campagneOptions, loading: campagneLoading } =
+    useRefRecordOptions(w, campagneTableId)
+  const campagneLabelById = useMemo(
+    () => new Map(campagneOptions.map((o) => [o.id, o.label])),
+    [campagneOptions]
+  )
+
+  const gereParTableId = useMemo(
+    () => refTargetTableId(schemas.gerePar),
+    [schemas.gerePar]
+  )
+  const { options: gereParOptions, loading: gereParLoading } =
+    useRefRecordOptions(w, gereParTableId)
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -573,7 +804,13 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
     })
   }
 
+  function handleDragStart(event: DragStartEvent) {
+    const id = Number(event.active.id)
+    setActiveTask(tasks.find((t) => t.id === id) ?? null)
+  }
+
   function handleDragEnd(event: DragEndEvent) {
+    setActiveTask(null)
     const target = resolveDropTarget(event)
     if (!target) return
     const task = tasks.find((t) => t.id === target.taskId)
@@ -608,6 +845,7 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
         <h1 className="text-sm font-medium text-foreground">Tâches</h1>
         <Button
           size="sm"
+          className="justify-center text-sm"
           onClick={() =>
             setPanel({
               mode: "new",
@@ -617,9 +855,46 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
           }
         >
           <Plus className="size-4" />
-          Nouvelle tâche
+          Ajouter une action
         </Button>
       </header>
+
+      {gereParFilterOptions.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border bg-background px-4 py-2">
+          <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+            Géré par
+          </span>
+          <button
+            type="button"
+            onClick={() => setActiveFilter(null)}
+            className={cn(
+              "rounded-sm border px-2 py-0.5 text-xs",
+              activeFilter === null
+                ? "border-primary bg-accent text-accent-foreground"
+                : "border-border text-muted-foreground hover:bg-muted"
+            )}
+          >
+            Tous
+          </button>
+          {gereParFilterOptions.map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() =>
+                setActiveFilter((cur) => (cur === value ? null : value))
+              }
+              className={cn(
+                "rounded-sm border px-2 py-0.5 text-xs",
+                activeFilter === value
+                  ? "border-primary bg-accent text-accent-foreground"
+                  : "border-border text-muted-foreground hover:bg-muted"
+              )}
+            >
+              {value}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       {w.actionError ? (
         <p
@@ -633,13 +908,16 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
       <DndContext
         sensors={sensors}
         collisionDetection={closestCorners}
+        onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
+        onDragCancel={() => setActiveTask(null)}
       >
         <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-4">
           {columns.map((column) => (
             <KanbanColumn
               key={column.value}
               column={column}
+              campagneLabelById={campagneLabelById}
               onOpenTask={(task) =>
                 setPanel({
                   mode: "edit",
@@ -650,6 +928,19 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
             />
           ))}
         </div>
+        <DragOverlay>
+          {activeTask ? (
+            <TaskCardOverlay
+              task={activeTask}
+              campagneLabel={
+                activeTask.campagne != null
+                  ? (campagneLabelById.get(activeTask.campagne) ??
+                    `#${activeTask.campagne}`)
+                  : null
+              }
+            />
+          ) : null}
+        </DragOverlay>
       </DndContext>
 
       <Sheet
@@ -663,8 +954,14 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
             task={panel.task}
             defaultStatut={panel.defaultStatut}
             statutChoices={statutChoices}
+            typeKind={typeKind}
             typeChoices={typeChoices}
             campagneOptions={campagneOptions}
+            campagneLoading={campagneLoading}
+            gereParKind={gereParKind}
+            gereParChoices={gereParChoices}
+            gereParOptions={gereParOptions}
+            gereParLoading={gereParLoading}
             onSave={async (patch) => {
               await saveTask(patch, panel.task?.id ?? null)
               setPanel(null)

@@ -32,13 +32,69 @@ export function buildColumnSchemas(
   return out
 }
 
-/** Unwrap `decodeGristValue`'s `{ __ref, rowId }` shape into a plain row id. */
+/**
+ * What shape a column's values actually take. A handful of fields (Type,
+ * "Géré par l'équipe") aren't pinned to one Grist column type across
+ * documents, so the form adapts its control to whichever of these the
+ * mapped column turns out to be.
+ */
+export type FieldKind = "text" | "choice" | "choicelist" | "ref" | "unknown"
+
+export function resolveFieldKind(schema?: GristReplicaColumn): FieldKind {
+  if (!schema?.type) return "unknown"
+  if (schema.type === "ChoiceList") return "choicelist"
+  if (schema.type === "Choice") return "choice"
+  if (schema.type.startsWith("Ref:")) return "ref"
+  return "text"
+}
+
+/**
+ * Unwrap `decodeGristValue`'s `{ __ref, rowId }` shape (or a bare row id)
+ * into a plain row id. Grist represents an *unset* Ref cell as `0`, not
+ * `null` — treat that as unset too, or an unlinked task would otherwise
+ * resolve to "row #0" instead of "no campagne".
+ */
 function unwrapRef(value: unknown): number | null {
   if (value && typeof value === "object" && "__ref" in value) {
     const rowId = (value as { rowId?: unknown }).rowId
-    return typeof rowId === "number" ? rowId : null
+    return typeof rowId === "number" && rowId !== 0 ? rowId : null
   }
-  return typeof value === "number" ? value : null
+  return typeof value === "number" && value !== 0 ? value : null
+}
+
+/**
+ * Decode a cell whose column might be Text, Choice, ChoiceList, or Ref into
+ * a uniform string list (`[]` unset, `[value]` scalar, full list for
+ * ChoiceList, `[String(rowId)]` for Ref — label resolved separately).
+ * Tolerates a value shape that doesn't match the declared kind (e.g. a
+ * scalar Choice read where `ChoiceList` was expected) instead of dropping it
+ * silently, since the two are easy to mix up when mapping a widget column.
+ */
+function decodeMultiValue(
+  raw: unknown,
+  schema: GristReplicaColumn | undefined
+): string[] {
+  const kind = resolveFieldKind(schema)
+  const decoded = schema ? decodeGristValue(raw, schema) : raw
+  if (kind === "ref") {
+    const rowId = unwrapRef(decoded)
+    return rowId != null ? [String(rowId)] : []
+  }
+  if (Array.isArray(decoded)) return decoded.map((v) => String(v))
+  if (decoded == null || decoded === "") return []
+  return [String(decoded)]
+}
+
+/** Encode a uniform string list back to the wire form matching the column's actual kind. */
+function encodeMultiValue(
+  values: string[],
+  schema: GristReplicaColumn | undefined
+): unknown {
+  const kind = resolveFieldKind(schema)
+  if (kind === "choicelist") return encodeGristValue(values, schema)
+  if (kind === "ref")
+    return encodeGristValue(values[0] ? Number(values[0]) : null, schema)
+  return values[0] ?? ""
 }
 
 /**
@@ -57,24 +113,32 @@ export function mapTaskRow(
       if (typeof real !== "string") continue
       const raw = row[real]
       const schema = schemas[logical as keyof TaskMapped]
-      const decoded = schema ? decodeGristValue(raw, schema) : raw
       switch (logical as keyof TaskMapped) {
         case "campagne":
-          mapped.campagne = unwrapRef(decoded)
+          mapped.campagne = unwrapRef(
+            schema ? decodeGristValue(raw, schema) : raw
+          )
           break
-        case "dateDebut":
+        case "dateDebut": {
+          const decoded = schema ? decodeGristValue(raw, schema) : raw
           mapped.dateDebut = decoded instanceof Date ? decoded : null
           break
-        case "dateFin":
+        }
+        case "dateFin": {
+          const decoded = schema ? decodeGristValue(raw, schema) : raw
           mapped.dateFin = decoded instanceof Date ? decoded : null
           break
+        }
         case "type":
-          mapped.type = Array.isArray(decoded)
-            ? decoded.map((v) => String(v))
-            : []
+          mapped.type = decodeMultiValue(raw, schema)
           break
-        default:
+        case "gerePar":
+          mapped.gerePar = decodeMultiValue(raw, schema)
+          break
+        default: {
+          const decoded = schema ? decodeGristValue(raw, schema) : raw
           ;(mapped as Record<string, unknown>)[logical] = decoded ?? ""
+        }
       }
     }
   }
@@ -89,6 +153,7 @@ export function mapTaskRow(
     type: mapped.type ?? [],
     commentaires: mapped.commentaires ?? "",
     creePar: mapped.creePar ?? "",
+    gerePar: mapped.gerePar ?? [],
   }
 }
 
@@ -107,11 +172,14 @@ export function encodeTaskPatch(
     out.dateFin = encodeGristValue(patch.dateFin, schemas.dateFin)
   if ("campagne" in patch)
     out.campagne = encodeGristValue(patch.campagne, schemas.campagne)
-  if ("type" in patch) out.type = encodeGristValue(patch.type, schemas.type)
+  if ("type" in patch)
+    out.type = encodeMultiValue(patch.type ?? [], schemas.type)
+  if ("gerePar" in patch)
+    out.gerePar = encodeMultiValue(patch.gerePar ?? [], schemas.gerePar)
   return out
 }
 
-/** Ordered Choice values for the Statut column (defines the Kanban columns), with styling. */
+/** Ordered Choice values for a Choice/ChoiceList column (defines the Kanban columns, or a picklist). */
 export function getStatutChoices(
   schema?: GristReplicaColumn
 ): GristChoiceListEntry[] {
@@ -200,7 +268,13 @@ export function useRefRecordOptions(
           })),
         })
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // Surface the failure instead of leaving the dropdown silently and
+        // permanently empty with no way to tell "still loading" from "broken".
+        console.error(
+          `Kanban: failed to load rows for referenced table "${targetTableId}"`,
+          err
+        )
         if (!cancelled) setFetched({ tableId: targetTableId, options: [] })
       })
     return () => {
@@ -212,6 +286,26 @@ export function useRefRecordOptions(
   const options = isCurrent ? fetched.options : []
   const loading = targetTableId != null && columns != null && !isCurrent
   return { options, loading }
+}
+
+/**
+ * Guarantee the currently-selected id always has a matching `<option>`, even
+ * before its real label has loaded (or if the fetch failed) — otherwise a
+ * native `<select value=selected>` silently falls back to its first option
+ * whenever `selected` isn't among the rendered ones, which looks exactly
+ * like "the field didn't pre-fill" even though the value is held correctly.
+ */
+export function withSelectedFallback(
+  options: RefRecordOption[],
+  selectedId: number | null,
+  loading: boolean
+): RefRecordOption[] {
+  if (selectedId == null || options.some((o) => o.id === selectedId))
+    return options
+  return [
+    { id: selectedId, label: loading ? "Chargement…" : `#${selectedId}` },
+    ...options,
+  ]
 }
 
 /** Label for the fallback bucket holding rows whose Statut isn't one of the known choices. */
@@ -234,4 +328,17 @@ export function resolveDropTarget(event: {
   const taskId = Number(event.active.id)
   const statut = String(event.over.data.current?.statut ?? event.over.id)
   return { taskId, statut }
+}
+
+/** Distinct, non-empty values of a multi-value field across a set of tasks, for building filter pills. */
+export function distinctFieldValues(
+  tasks: readonly { gerePar: string[] }[]
+): string[] {
+  const seen = new Set<string>()
+  for (const task of tasks) {
+    for (const value of task.gerePar) {
+      if (value) seen.add(value)
+    }
+  }
+  return Array.from(seen).sort((a, b) => a.localeCompare(b, "fr"))
 }

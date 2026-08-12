@@ -59,6 +59,14 @@ function kanbanFixture(): GristReplicaDocument {
           },
           COMMENTAIRES: { type: "Text", label: "Commentaires" },
           CREE_PAR: { type: "Text", label: "Créé par" },
+          // Modeled as a single Choice here (as opposed to TYPE's ChoiceList)
+          // specifically to exercise the adaptive field's "choice" branch —
+          // real documents may map either shape to this logical field.
+          GERE_PAR: {
+            type: "Choice",
+            label: "Géré par l'équipe",
+            widgetOptions: { choices: ["Équipe A", "Équipe B"] },
+          },
         },
         rows: [
           {
@@ -72,6 +80,7 @@ function kanbanFixture(): GristReplicaDocument {
             TYPE: ["Réunion"],
             COMMENTAIRES: "",
             CREE_PAR: "Marine",
+            GERE_PAR: "Équipe A",
           },
           {
             id: 2,
@@ -84,6 +93,7 @@ function kanbanFixture(): GristReplicaDocument {
             TYPE: [],
             COMMENTAIRES: "",
             CREE_PAR: "",
+            GERE_PAR: "",
           },
         ],
       },
@@ -109,6 +119,7 @@ const MAPPINGS = {
   type: "TYPE",
   commentaires: "COMMENTAIRES",
   creePar: "CREE_PAR",
+  gerePar: "GERE_PAR",
 }
 
 function Wrapped() {
@@ -163,10 +174,12 @@ describe("App", () => {
     // Ligne 3 : dates
     expect(screen.getByLabelText("Date début")).toHaveValue("2026-01-05")
     expect(screen.getByLabelText("Date fin")).toHaveValue("2026-01-10")
-    // Ligne 4 : service + type
+    // Ligne 4 : service + géré par l'équipe
     expect(screen.getByLabelText("Service responsable")).toHaveValue(
       "Communication"
     )
+    expect(screen.getByLabelText("Géré par l'équipe")).toHaveValue("Équipe A")
+    // Ligne 4bis : type (choice list -> cases à cocher)
     expect(screen.getByRole("checkbox", { name: "Réunion" })).toBeChecked()
     expect(
       screen.getByRole("checkbox", { name: "Formation" })
@@ -208,8 +221,8 @@ describe("App", () => {
   it("creates a new task from the top-level button", async () => {
     const { emulator } = renderBoard()
 
-    await waitFor(() => screen.getByText("Nouvelle tâche"))
-    fireEvent.click(screen.getByText("Nouvelle tâche"))
+    await waitFor(() => screen.getByText("Ajouter une action"))
+    fireEvent.click(screen.getByText("Ajouter une action"))
 
     await waitFor(() => screen.getByLabelText("Titre"))
     fireEvent.change(screen.getByLabelText("Titre"), {
@@ -232,6 +245,25 @@ describe("App", () => {
         ])
       )
     })
+  })
+
+  it("filters cards by Géré par l'équipe", async () => {
+    renderBoard()
+
+    await waitFor(() => screen.getByText("Préparer le kickoff"))
+    expect(screen.getByText("Rédiger le bilan")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole("button", { name: "Équipe A" }))
+    await waitFor(() =>
+      expect(screen.queryByText("Rédiger le bilan")).not.toBeInTheDocument()
+    )
+    expect(screen.getByText("Préparer le kickoff")).toBeInTheDocument()
+
+    // Clicking the active filter again clears it.
+    fireEvent.click(screen.getByRole("button", { name: "Équipe A" }))
+    await waitFor(() =>
+      expect(screen.getByText("Rédiger le bilan")).toBeInTheDocument()
+    )
   })
 
   it("deletes a task", async () => {

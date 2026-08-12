@@ -24,4 +24,12 @@ export type TaskMapped = {
   type: string[]
   commentaires: string
   creePar: string
+  /**
+   * "Géré par l'équipe" — column type isn't fixed (Text, Choice, ChoiceList,
+   * or Ref, depending on how each document set it up), so it's normalized to
+   * a list of string values uniformly: `[]` unset, `[value]` for a scalar,
+   * the full list for a ChoiceList, `[String(rowId)]` for a Ref (label
+   * resolved separately, same as `campagne`).
+   */
+  gerePar: string[]
 }
