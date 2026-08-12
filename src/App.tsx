@@ -144,6 +144,19 @@ function resolveCampagneLabel(
   return campagneLabelById.get(value) ?? value
 }
 
+// One pale, distinct tint per Kanban column (cycling if there are more
+// columns than colors) -- sober DSFR-style tints, not the previous widget's
+// vivid yellow/green fills. Paired light/dark values so the column reads
+// correctly in both themes.
+const COLUMN_TINTS = [
+  "bg-blue-50 dark:bg-blue-950/30",
+  "bg-amber-50 dark:bg-amber-950/30",
+  "bg-emerald-50 dark:bg-emerald-950/30",
+  "bg-rose-50 dark:bg-rose-950/30",
+  "bg-violet-50 dark:bg-violet-950/30",
+  "bg-cyan-50 dark:bg-cyan-950/30",
+]
+
 type ColumnData = { value: string; label: string; tasks: Task[] }
 
 function buildColumns(
@@ -227,9 +240,11 @@ function draftFromTask(task: Task | null, defaultStatut: string): Draft {
 function TaskCardContent({
   task,
   campagneLabel,
+  typeColorByValue,
 }: {
   task: Task
   campagneLabel: string | null
+  typeColorByValue: Map<string, GristChoiceListEntry>
 }) {
   return (
     <>
@@ -263,9 +278,25 @@ function TaskCardContent({
       ) : null}
       {task.type.length > 0 ? (
         <div className="mt-1.5 flex flex-wrap gap-1">
-          {task.type.map((t) => (
-            <Badge key={t}>{t}</Badge>
-          ))}
+          {task.type.map((t) => {
+            const color = typeColorByValue.get(t)
+            return (
+              <Badge
+                key={t}
+                style={
+                  color?.fillColor
+                    ? {
+                        backgroundColor: color.fillColor,
+                        color: color.textColor,
+                        borderColor: color.fillColor,
+                      }
+                    : undefined
+                }
+              >
+                {t}
+              </Badge>
+            )
+          })}
         </div>
       ) : null}
     </>
@@ -275,10 +306,12 @@ function TaskCardContent({
 function TaskCard({
   task,
   campagneLabel,
+  typeColorByValue,
   onOpen,
 }: {
   task: Task
   campagneLabel: string | null
+  typeColorByValue: Map<string, GristChoiceListEntry>
   onOpen: () => void
 }) {
   const {
@@ -308,7 +341,11 @@ function TaskCard({
         isDragging && "opacity-40"
       )}
     >
-      <TaskCardContent task={task} campagneLabel={campagneLabel} />
+      <TaskCardContent
+        task={task}
+        campagneLabel={campagneLabel}
+        typeColorByValue={typeColorByValue}
+      />
     </div>
   )
 }
@@ -319,24 +356,34 @@ function TaskCard({
 function TaskCardOverlay({
   task,
   campagneLabel,
+  typeColorByValue,
 }: {
   task: Task
   campagneLabel: string | null
+  typeColorByValue: Map<string, GristChoiceListEntry>
 }) {
   return (
     <div className="cursor-grabbing rounded-md border border-primary bg-card p-2.5 text-left text-sm shadow-lg">
-      <TaskCardContent task={task} campagneLabel={campagneLabel} />
+      <TaskCardContent
+        task={task}
+        campagneLabel={campagneLabel}
+        typeColorByValue={typeColorByValue}
+      />
     </div>
   )
 }
 
 function KanbanColumn({
   column,
+  index,
   campagneLabelById,
+  typeColorByValue,
   onOpenTask,
 }: {
   column: ColumnData
+  index: number
   campagneLabelById: Map<string, string>
+  typeColorByValue: Map<string, GristChoiceListEntry>
   onOpenTask: (task: Task) => void
 }) {
   const { setNodeRef, isOver } = useDroppable({
@@ -348,11 +395,12 @@ function KanbanColumn({
     <div
       ref={setNodeRef}
       className={cn(
-        "flex w-96 shrink-0 flex-col rounded-md border border-border bg-background",
+        "flex min-w-0 flex-1 flex-col rounded-md border border-border",
+        COLUMN_TINTS[index % COLUMN_TINTS.length],
         isOver && "border-primary ring-1 ring-primary"
       )}
     >
-      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+      <div className="flex items-center justify-between border-b border-border/70 px-3 py-2">
         <h2 className="text-sm font-medium text-foreground">{column.label}</h2>
         <Badge>{column.tasks.length}</Badge>
       </div>
@@ -371,6 +419,7 @@ function KanbanColumn({
                 key={task.id}
                 task={task}
                 campagneLabel={resolveCampagneLabel(task, campagneLabelById)}
+                typeColorByValue={typeColorByValue}
                 onOpen={() => onOpenTask(task)}
               />
             ))
@@ -930,6 +979,12 @@ function KanbanBoard({
     () => getStatutChoices(schemas.type),
     [schemas.type]
   )
+  // Each Type choice can carry its own fill/text color in Grist -- shown on
+  // the card badges, same colors as configured on the Choice column itself.
+  const typeColorByValue = useMemo(
+    () => new Map(typeChoices.map((c) => [c.value, c])),
+    [typeChoices]
+  )
   const typeDisabled = useMemo(
     () => isFormulaColumn(schemas.type),
     [schemas.type]
@@ -1138,12 +1193,14 @@ function KanbanBoard({
         onDragEnd={handleDragEnd}
         onDragCancel={() => setActiveTask(null)}
       >
-        <div className="flex min-h-0 flex-1 gap-3 overflow-x-auto p-4">
-          {columns.map((column) => (
+        <div className="flex min-h-0 flex-1 gap-3 overflow-y-auto p-4">
+          {columns.map((column, index) => (
             <KanbanColumn
               key={column.value}
               column={column}
+              index={index}
               campagneLabelById={campagneLabelById}
+              typeColorByValue={typeColorByValue}
               onOpenTask={(task) =>
                 setPanel({
                   mode: "edit",
@@ -1162,6 +1219,7 @@ function KanbanBoard({
                 activeTask,
                 campagneLabelById
               )}
+              typeColorByValue={typeColorByValue}
             />
           ) : null}
         </DragOverlay>

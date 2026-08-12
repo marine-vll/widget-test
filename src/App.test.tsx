@@ -61,7 +61,12 @@ function kanbanFixture(): GristReplicaDocument {
           TYPE: {
             type: "ChoiceList",
             label: "Type",
-            widgetOptions: { choices: ["Réunion", "Formation"] },
+            widgetOptions: {
+              choices: ["Réunion", "Formation"],
+              choiceOptions: {
+                Réunion: { fillColor: "#FFECB3", textColor: "#5D4037" },
+              },
+            },
           },
           COMMENTAIRES: { type: "Text", label: "Commentaires" },
           CREE_PAR: { type: "Text", label: "Créé par" },
@@ -265,6 +270,16 @@ describe("App", () => {
 
     expect(screen.getByText("Préparer le kickoff")).toBeInTheDocument()
     expect(screen.getByText("Rédiger le bilan")).toBeInTheDocument()
+  })
+
+  it("colors a Type badge on the card with that choice's own fill/text color from Grist", async () => {
+    renderBoard()
+
+    await waitFor(() => screen.getByText("Réunion"))
+    expect(screen.getByText("Réunion")).toHaveStyle({
+      backgroundColor: "#FFECB3",
+      color: "#5D4037",
+    })
   })
 
   it("opens an existing task and groups fields exactly per the requested layout", async () => {
