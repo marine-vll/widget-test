@@ -304,7 +304,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Service responsable")).toHaveValue(
       "Communication"
     )
-    expect(screen.getByLabelText("Géré par l'équipe")).toHaveValue("Équipe A")
+    expect(screen.getByLabelText("Géré par l'équipe *")).toHaveValue("Équipe A")
     // Ligne 4bis : type (choice list -> cases à cocher)
     expect(screen.getByRole("checkbox", { name: "Réunion" })).toBeChecked()
     expect(
@@ -332,6 +332,11 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Titre"), {
       target: { value: "Rédiger le bilan final" },
     })
+    // This task started with no "Géré par l'équipe" -- required (see the
+    // dedicated test below), so pick one before saving.
+    fireEvent.change(screen.getByLabelText("Géré par l'équipe *"), {
+      target: { value: "Équipe B" },
+    })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
     })
@@ -354,6 +359,9 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Titre"), {
       target: { value: "Nouvelle campagne presse" },
     })
+    fireEvent.change(screen.getByLabelText("Géré par l'équipe *"), {
+      target: { value: "Équipe A" },
+    })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
     })
@@ -371,6 +379,34 @@ describe("App", () => {
         ])
       )
     })
+  })
+
+  it("blocks creating a task without 'Géré par l'équipe' instead of letting Grist's access rule reject it", async () => {
+    // Grist access rules can require this field to be non-empty on every
+    // row (e.g. `not rec.Gere_par_l_equipe` denying everyone, evaluated
+    // before any role-based rule) -- the widget can't fill it in on its own
+    // (no access to the connected user's team), so it must not even attempt
+    // a create that would be rejected.
+    const { emulator } = renderBoard()
+
+    await waitFor(() => screen.getByText("Ajouter une action"))
+    fireEvent.click(screen.getByText("Ajouter une action"))
+
+    await waitFor(() => screen.getByLabelText("Titre"))
+    fireEvent.change(screen.getByLabelText("Titre"), {
+      target: { value: "Sans équipe" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
+
+    expect(screen.getByText(/obligatoire/)).toBeInTheDocument()
+    expect(actionsOf(emulator)).not.toContainEqual(
+      expect.arrayContaining([
+        "AddRecord",
+        "Tasks",
+        null,
+        expect.objectContaining({ TITRE: "Sans équipe" }),
+      ])
+    )
   })
 
   it("filters cards by Géré par l'équipe", async () => {

@@ -645,6 +645,7 @@ function TaskFormPanel({
   gereParOptions,
   gereParLoading,
   gereParDisabled,
+  gereParMapped,
   onSave,
   onDelete,
 }: {
@@ -670,9 +671,11 @@ function TaskFormPanel({
   gereParOptions: RefRecordOption[]
   gereParLoading: boolean
   gereParDisabled: boolean
+  gereParMapped: boolean
   onSave: (patch: Partial<TaskMapped>) => Promise<void>
   onDelete?: () => Promise<void>
 }) {
+  const gereParRequired = gereParMapped && !gereParDisabled
   const [draft, setDraft] = useState<Draft>(() =>
     draftFromTask(task, defaultStatut)
   )
@@ -686,6 +689,19 @@ function TaskFormPanel({
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
+    // Grist's own Access Rules (not this widget) can require "Géré par
+    // l'équipe" to be set on every row -- if it's ever empty, a rule like
+    // `not rec.Gere_par_l_equipe` matches first and blocks the write
+    // entirely, for *every* role, before any role-based rule further down
+    // even runs. The widget can't fill this in automatically (it has no
+    // access to the connected user's team), so it's enforced here instead
+    // of letting the save fail with Grist's generic access-rule error.
+    if (gereParRequired && draft.gerePar.length === 0) {
+      setError(
+        "Le champ « Géré par l'équipe » est obligatoire (règle d'accès Grist) : choisis une équipe avant d'enregistrer."
+      )
+      return
+    }
     setSaving(true)
     try {
       await onSave({
@@ -825,7 +841,7 @@ function TaskFormPanel({
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="task-gere-par" id="task-gere-par-label">
-              Géré par l'équipe
+              Géré par l'équipe{gereParRequired ? " *" : ""}
             </Label>
             <AdaptiveMultiField
               id="task-gere-par"
@@ -1001,6 +1017,16 @@ function KanbanBoard({
     () => isFormulaColumn(schemas.gerePar),
     [schemas.gerePar]
   )
+  // Whether "Géré par l'équipe" is mapped to a real column at all -- some
+  // documents don't use it, in which case it's neither writable nor subject
+  // to any Grist access rule keyed on it, so requiring it in the form
+  // wouldn't make sense (distinct from `gereParKind === "unknown"`, which
+  // is also true briefly while schema is still loading for a field that
+  // *is* mapped).
+  const gereParMapped = useMemo(() => {
+    const real = w.recordsMappings?.gerePar
+    return Array.isArray(real) ? real.length > 0 : typeof real === "string"
+  }, [w.recordsMappings])
   const columns = useMemo(
     () => buildColumns(statutChoices, filteredTasks),
     [statutChoices, filteredTasks]
@@ -1254,6 +1280,7 @@ function KanbanBoard({
             gereParOptions={gereParOptions}
             gereParLoading={gereParLoading}
             gereParDisabled={gereParDisabled}
+            gereParMapped={gereParMapped}
             onSave={async (patch) => {
               await saveTask(patch, panel.task?.id ?? null)
               setPanel(null)
