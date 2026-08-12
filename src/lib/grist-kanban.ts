@@ -5,6 +5,7 @@ import {
   normalizeGristChoiceListEntries,
   useGristSchema,
   type GristChoiceListEntry,
+  type GristColumnsToMap,
   type GristReplicaColumn,
   type GristRowRecord,
   type GristWidgetColumnMap,
@@ -328,6 +329,33 @@ export function resolveDropTarget(event: {
   const taskId = Number(event.active.id)
   const statut = String(event.over.data.current?.statut ?? event.over.id)
   return { taskId, statut }
+}
+
+export type ColumnMappingGap = { name: string; title: string }
+
+/**
+ * Logical fields declared in `GRIST_OPTIONS.columns` that currently have no
+ * real column assigned in Grist's own widget configuration panel (the
+ * per-field pickers next to the ⚙ icon) — as opposed to a read/decode bug in
+ * this widget's code. A field left unmapped there always reads as empty
+ * here, indistinguishable from "the code failed to read it" without this
+ * check, since `w.recordsMappings` simply omits (or nulls) its entry.
+ */
+export function findUnmappedColumns(
+  mappings: GristWidgetColumnMap | null,
+  columnsSpec: GristColumnsToMap | undefined
+): ColumnMappingGap[] {
+  if (!columnsSpec) return []
+  const gaps: ColumnMappingGap[] = []
+  for (const col of columnsSpec) {
+    if (typeof col === "string") continue
+    const real = mappings?.[col.name]
+    const isMapped = Array.isArray(real)
+      ? real.length > 0
+      : typeof real === "string" && real.length > 0
+    if (!isMapped) gaps.push({ name: col.name, title: col.title ?? col.name })
+  }
+  return gaps
 }
 
 /** Distinct, non-empty values of a multi-value field across a set of tasks, for building filter pills. */

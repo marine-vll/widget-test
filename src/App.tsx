@@ -40,6 +40,7 @@ import {
   buildColumnSchemas,
   distinctFieldValues,
   encodeTaskPatch,
+  findUnmappedColumns,
   getStatutChoices,
   mapTaskRow,
   refTargetTableId,
@@ -48,6 +49,7 @@ import {
   UNASSIGNED_STATUS,
   useRefRecordOptions,
   withSelectedFallback,
+  type ColumnMappingGap,
   type FieldKind,
   type RefRecordOption,
   type TaskColumnSchemas,
@@ -727,7 +729,15 @@ type PanelState = {
   defaultStatut: string
 }
 
-function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
+function KanbanBoard({
+  w,
+  schemas,
+  unmappedColumns,
+}: {
+  w: Grist
+  schemas: TaskColumnSchemas
+  unmappedColumns: ColumnMappingGap[]
+}) {
   const [panel, setPanel] = useState<PanelState | null>(null)
   const [activeTask, setActiveTask] = useState<Task | null>(null)
   const [activeFilter, setActiveFilter] = useState<string | null>(null)
@@ -858,6 +868,18 @@ function KanbanBoard({ w, schemas }: { w: Grist; schemas: TaskColumnSchemas }) {
           Ajouter une action
         </Button>
       </header>
+
+      {unmappedColumns.length > 0 ? (
+        <p
+          role="status"
+          className="border-b border-border bg-accent/40 px-4 py-2 text-xs text-accent-foreground"
+        >
+          Colonnes pas encore associées dans la configuration du widget (icône ⚙
+          du panneau Grist) : {unmappedColumns.map((c) => c.title).join(", ")}.
+          Tant qu'une colonne n'est pas associée à une colonne réelle, son champ
+          reste vide ici — même si la donnée existe déjà dans la table.
+        </p>
+      ) : null}
 
       {gereParFilterOptions.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 border-b border-border bg-background px-4 py-2">
@@ -994,6 +1016,11 @@ export function App() {
     [w.recordsMappings, schema.table?.columns]
   )
 
+  const unmappedColumns = useMemo(
+    () => findUnmappedColumns(w.recordsMappings, GRIST_OPTIONS.columns),
+    [w.recordsMappings]
+  )
+
   if (w.columnMappingStatus.pending) {
     return (
       <EmptyState
@@ -1012,7 +1039,9 @@ export function App() {
     )
   }
 
-  return <KanbanBoard w={w} schemas={schemas} />
+  return (
+    <KanbanBoard w={w} schemas={schemas} unmappedColumns={unmappedColumns} />
+  )
 }
 
 export default App

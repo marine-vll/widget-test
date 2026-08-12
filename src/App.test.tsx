@@ -23,7 +23,7 @@ import {
   within,
 } from "grist-widget-sdk/emulator/testing"
 
-import { resolveDropTarget } from "@/lib/grist-kanban"
+import { findUnmappedColumns, resolveDropTarget } from "@/lib/grist-kanban"
 
 import App, { GRIST_OPTIONS } from "./App"
 
@@ -143,6 +143,33 @@ function renderBoard() {
 }
 
 describe("App", () => {
+  it("does not show the unmapped-columns notice once every field is mapped", async () => {
+    renderBoard()
+
+    await waitFor(() => screen.getByText("Préparer le kickoff"))
+    expect(screen.queryByText(/pas encore associées/)).not.toBeInTheDocument()
+  })
+
+  it("flags logical fields left unmapped in Grist's own config panel", async () => {
+    const { emulator } = renderWithGrist(<Wrapped />, {
+      emulator: { document: kanbanFixture() },
+    })
+    // Only Statut/Titre mapped -- every optional field (Campagne, dates,
+    // Service, Type, Créé par, Géré par) is left unset, exactly like a
+    // widget instance whose config panel was never fully filled in. This is
+    // the scenario that makes those fields read as empty even though the
+    // underlying Grist columns have data.
+    emulator.setColumnMappings({ statut: "STATUT", titre: "TITRE" })
+
+    await waitFor(() => screen.getByText("Préparer le kickoff"))
+    // dnd-kit also renders its own (unrelated) `role="status"` live region,
+    // so target the notice by its text rather than by role.
+    const notice = screen.getByText(/pas encore associées/).closest("p")!
+    expect(notice).toHaveTextContent("Campagne")
+    expect(notice).toHaveTextContent("Créé par")
+    expect(notice).toHaveTextContent("Géré par l'équipe")
+  })
+
   it("builds one Kanban column per Statut choice and sorts cards into them", async () => {
     renderBoard()
 
@@ -280,6 +307,30 @@ describe("App", () => {
     await waitFor(() => {
       expect(actionsOf(emulator)).toContainEqual(["RemoveRecord", "Tasks", 1])
     })
+  })
+})
+
+describe("findUnmappedColumns", () => {
+  it("lists optional fields with no real column assigned", () => {
+    const spec = [
+      { name: "statut", title: "Statut" },
+      { name: "titre", title: "Titre" },
+      { name: "campagne", title: "Campagne", optional: true },
+      { name: "creePar", title: "Créé par", optional: true },
+    ]
+    const gaps = findUnmappedColumns(
+      { statut: "STATUT", titre: "TITRE", campagne: undefined, creePar: "" },
+      spec
+    )
+    expect(gaps).toEqual([
+      { name: "campagne", title: "Campagne" },
+      { name: "creePar", title: "Créé par" },
+    ])
+  })
+
+  it("returns nothing when every field has a real column", () => {
+    const spec = [{ name: "statut", title: "Statut" }]
+    expect(findUnmappedColumns({ statut: "STATUT" }, spec)).toEqual([])
   })
 })
 
