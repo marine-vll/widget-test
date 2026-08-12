@@ -304,7 +304,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Service responsable")).toHaveValue(
       "Communication"
     )
-    expect(screen.getByLabelText("Géré par l'équipe *")).toHaveValue("Équipe A")
+    expect(screen.getByLabelText("Géré par l'équipe")).toHaveValue("Équipe A")
     // Ligne 4bis : type (choice list -> cases à cocher)
     expect(screen.getByRole("checkbox", { name: "Réunion" })).toBeChecked()
     expect(
@@ -332,11 +332,6 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Titre"), {
       target: { value: "Rédiger le bilan final" },
     })
-    // This task started with no "Géré par l'équipe" -- required (see the
-    // dedicated test below), so pick one before saving.
-    fireEvent.change(screen.getByLabelText("Géré par l'équipe *"), {
-      target: { value: "Équipe B" },
-    })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
     })
@@ -349,7 +344,15 @@ describe("App", () => {
     })
   })
 
-  it("creates a new task from the top-level button", async () => {
+  it("creates a new task from the top-level button, omitting untouched optional fields entirely", async () => {
+    // Confirmed against kanban2's own create code: a field the user leaves
+    // blank on creation must be *absent* from the AddRecord action, not
+    // sent as "" -- Grist only applies a column's own default value /
+    // trigger formula (e.g. auto-filling "Créé par" from the connected
+    // user, or "Géré par l'équipe" from their default team) when the field
+    // is missing from the action. Sending it blank would override that
+    // default and could even trip an access rule keyed on it always being
+    // set (`not rec.Gere_par_l_equipe`, seen live).
     const { emulator } = renderBoard()
 
     await waitFor(() => screen.getByText("Ajouter une action"))
@@ -359,34 +362,24 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Titre"), {
       target: { value: "Nouvelle campagne presse" },
     })
-    fireEvent.change(screen.getByLabelText("Géré par l'équipe *"), {
-      target: { value: "Équipe A" },
-    })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
     })
 
     await waitFor(() => {
-      expect(actionsOf(emulator)).toContainEqual(
-        expect.arrayContaining([
-          "AddRecord",
-          "Tasks",
-          null,
-          expect.objectContaining({
-            TITRE: "Nouvelle campagne presse",
-            STATUT: "A faire",
-          }),
-        ])
-      )
+      const added = actionsOf(emulator).find(
+        (a) => a[0] === "AddRecord" && a[1] === "Tasks"
+      ) as [string, string, null, Record<string, unknown>] | undefined
+      expect(added).toBeDefined()
+      const fields = added![3]
+      expect(fields.TITRE).toBe("Nouvelle campagne presse")
+      expect(fields.STATUT).toBe("A faire")
+      expect(fields).not.toHaveProperty("GERE_PAR")
+      expect(fields).not.toHaveProperty("CREE_PAR")
     })
   })
 
-  it("blocks creating a task without 'Géré par l'équipe' instead of letting Grist's access rule reject it", async () => {
-    // Grist access rules can require this field to be non-empty on every
-    // row (e.g. `not rec.Gere_par_l_equipe` denying everyone, evaluated
-    // before any role-based rule) -- the widget can't fill it in on its own
-    // (no access to the connected user's team), so it must not even attempt
-    // a create that would be rejected.
+  it("still sends Géré par l'équipe on creation when the user did pick one", async () => {
     const { emulator } = renderBoard()
 
     await waitFor(() => screen.getByText("Ajouter une action"))
@@ -394,19 +387,21 @@ describe("App", () => {
 
     await waitFor(() => screen.getByLabelText("Titre"))
     fireEvent.change(screen.getByLabelText("Titre"), {
-      target: { value: "Sans équipe" },
+      target: { value: "Avec équipe" },
     })
-    fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
+    fireEvent.change(screen.getByLabelText("Géré par l'équipe"), {
+      target: { value: "Équipe A" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
+    })
 
-    expect(screen.getByText(/obligatoire/)).toBeInTheDocument()
-    expect(actionsOf(emulator)).not.toContainEqual(
-      expect.arrayContaining([
-        "AddRecord",
-        "Tasks",
-        null,
-        expect.objectContaining({ TITRE: "Sans équipe" }),
-      ])
-    )
+    await waitFor(() => {
+      const added = actionsOf(emulator).find(
+        (a) => a[0] === "AddRecord" && a[1] === "Tasks"
+      ) as [string, string, null, Record<string, unknown>] | undefined
+      expect(added?.[3].GERE_PAR).toBe("Équipe A")
+    })
   })
 
   it("filters cards by Géré par l'équipe", async () => {

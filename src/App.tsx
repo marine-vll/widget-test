@@ -645,7 +645,6 @@ function TaskFormPanel({
   gereParOptions,
   gereParLoading,
   gereParDisabled,
-  gereParMapped,
   onSave,
   onDelete,
 }: {
@@ -671,11 +670,9 @@ function TaskFormPanel({
   gereParOptions: RefRecordOption[]
   gereParLoading: boolean
   gereParDisabled: boolean
-  gereParMapped: boolean
   onSave: (patch: Partial<TaskMapped>) => Promise<void>
   onDelete?: () => Promise<void>
 }) {
-  const gereParRequired = gereParMapped && !gereParDisabled
   const [draft, setDraft] = useState<Draft>(() =>
     draftFromTask(task, defaultStatut)
   )
@@ -689,39 +686,51 @@ function TaskFormPanel({
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setError(null)
-    // Grist's own Access Rules (not this widget) can require "Géré par
-    // l'équipe" to be set on every row -- if it's ever empty, a rule like
-    // `not rec.Gere_par_l_equipe` matches first and blocks the write
-    // entirely, for *every* role, before any role-based rule further down
-    // even runs. The widget can't fill this in automatically (it has no
-    // access to the connected user's team), so it's enforced here instead
-    // of letting the save fail with Grist's generic access-rule error.
-    if (gereParRequired && draft.gerePar.length === 0) {
-      setError(
-        "Le champ « Géré par l'équipe » est obligatoire (règle d'accès Grist) : choisis une équipe avant d'enregistrer."
-      )
-      return
-    }
     setSaving(true)
+    // On creation, a field the user left untouched is omitted from the
+    // write entirely instead of sent as an explicit empty value. Grist only
+    // applies a column's own default value / trigger formula (e.g.
+    // auto-filling "Créé par" from the connected user, or "Géré par
+    // l'équipe" from their default team) when that field is *absent* from
+    // the create action -- sending it, even blank, overrides the default
+    // and blocks it from ever running (confirmed against kanban2's own
+    // create code, which does exactly this: it omits a field's key
+    // entirely rather than setting it to "" or null). Editing an existing
+    // task still sends every field as-is, since a blank value there is a
+    // deliberate clear, not "let Grist decide".
+    const omitIfNewAndEmpty = mode === "new"
     try {
       await onSave({
         // Grist rejects a write to a formula-backed column regardless of
         // what this UI shows -- omit these from the patch entirely rather
         // than let the whole save fail over an untouched disabled field.
-        ...(campagneDisabled ? {} : { campagne: draft.campagne }),
+        ...(campagneDisabled ||
+        (omitIfNewAndEmpty && draft.campagne.length === 0)
+          ? {}
+          : { campagne: draft.campagne }),
         titre: draft.titre,
-        ...(dateDebutEditable
+        ...(dateDebutEditable && !(omitIfNewAndEmpty && !draft.dateDebut)
           ? { dateDebut: fromDateInputValue(draft.dateDebut) }
           : {}),
-        ...(dateFinEditable
+        ...(dateFinEditable && !(omitIfNewAndEmpty && !draft.dateFin)
           ? { dateFin: fromDateInputValue(draft.dateFin) }
           : {}),
-        service: draft.service,
-        ...(typeDisabled ? {} : { type: draft.type }),
-        commentaires: draft.commentaires,
+        ...(omitIfNewAndEmpty && !draft.service
+          ? {}
+          : { service: draft.service }),
+        ...(typeDisabled || (omitIfNewAndEmpty && draft.type.length === 0)
+          ? {}
+          : { type: draft.type }),
+        ...(omitIfNewAndEmpty && !draft.commentaires
+          ? {}
+          : { commentaires: draft.commentaires }),
         statut: draft.statut,
-        creePar: draft.creePar,
-        ...(gereParDisabled ? {} : { gerePar: draft.gerePar }),
+        ...(omitIfNewAndEmpty && !draft.creePar
+          ? {}
+          : { creePar: draft.creePar }),
+        ...(gereParDisabled || (omitIfNewAndEmpty && draft.gerePar.length === 0)
+          ? {}
+          : { gerePar: draft.gerePar }),
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -841,7 +850,7 @@ function TaskFormPanel({
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="task-gere-par" id="task-gere-par-label">
-              Géré par l'équipe{gereParRequired ? " *" : ""}
+              Géré par l'équipe
             </Label>
             <AdaptiveMultiField
               id="task-gere-par"
@@ -1017,16 +1026,6 @@ function KanbanBoard({
     () => isFormulaColumn(schemas.gerePar),
     [schemas.gerePar]
   )
-  // Whether "Géré par l'équipe" is mapped to a real column at all -- some
-  // documents don't use it, in which case it's neither writable nor subject
-  // to any Grist access rule keyed on it, so requiring it in the form
-  // wouldn't make sense (distinct from `gereParKind === "unknown"`, which
-  // is also true briefly while schema is still loading for a field that
-  // *is* mapped).
-  const gereParMapped = useMemo(() => {
-    const real = w.recordsMappings?.gerePar
-    return Array.isArray(real) ? real.length > 0 : typeof real === "string"
-  }, [w.recordsMappings])
   const columns = useMemo(
     () => buildColumns(statutChoices, filteredTasks),
     [statutChoices, filteredTasks]
@@ -1280,7 +1279,6 @@ function KanbanBoard({
             gereParOptions={gereParOptions}
             gereParLoading={gereParLoading}
             gereParDisabled={gereParDisabled}
-            gereParMapped={gereParMapped}
             onSave={async (patch) => {
               await saveTask(patch, panel.task?.id ?? null)
               setPanel(null)
