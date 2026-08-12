@@ -17,8 +17,18 @@ export type TaskMapped = {
   titre: string
   /** Referenced row id in the linked table, or `null` when unset. */
   campagne: number | null
+  /**
+   * Set only when the column mapped to "Campagne" turns out not to be an
+   * actual Ref/RefList (e.g. a computed display column) -- the raw text so
+   * the card/form can still show *something* meaningful instead of a
+   * silently-blank reference field.
+   */
+  campagneDisplay: string | null
   dateDebut: Date | null
+  /** Raw text fallback when the mapped column isn't decodable as a date. */
+  dateDebutDisplay: string | null
   dateFin: Date | null
+  dateFinDisplay: string | null
   service: string
   /** ChoiceList column. */
   type: string[]

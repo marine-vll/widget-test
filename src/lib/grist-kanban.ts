@@ -53,6 +53,18 @@ export function resolveFieldKind(schema?: GristReplicaColumn): FieldKind {
 }
 
 /**
+ * Whether a column is (or might turn out to be, before its schema has
+ * loaded) an actual Date/DateTime column. Used to decide whether a date
+ * field's UI should show the native date input or fall back to a read-only
+ * display, *without* flashing that fallback during the normal window before
+ * `schema` resolves -- `undefined` gets the benefit of the doubt.
+ */
+export function isDateLikeColumn(schema?: GristReplicaColumn): boolean {
+  if (!schema?.type) return true
+  return schema.type === "Date" || schema.type.startsWith("DateTime")
+}
+
+/**
  * Unwrap `decodeGristValue`'s `{ __ref, rowId }` shape (or a bare row id)
  * into a plain row id. Grist represents an *unset* Ref cell as `0`, not
  * `null` — treat that as unset too, or an unlinked task would otherwise
@@ -67,15 +79,13 @@ function unwrapRef(value: unknown): number | null {
 }
 
 /**
- * Decode a Ref *or* RefList cell into a single row id (the first linked
- * record for a RefList) — the dedicated Campagne field keeps a single-select
- * UI even when the underlying column technically allows several.
+ * Extract a single row id from an already-decoded Ref *or* RefList value
+ * (the first linked record for a RefList) — the dedicated Campagne field
+ * keeps a single-select UI even when the underlying column technically
+ * allows several. Takes the decoded value (not raw + schema) so callers can
+ * reuse the same `decodeGristValue` call for a display-text fallback too.
  */
-function decodeRefValue(
-  raw: unknown,
-  schema: GristReplicaColumn | undefined
-): number | null {
-  const decoded = decodeGristValue(raw, schema)
+function extractRefId(decoded: unknown): number | null {
   if (Array.isArray(decoded)) {
     for (const item of decoded) {
       const id = unwrapRef(item)
@@ -248,21 +258,34 @@ export function mapTaskRow(
       const schema = schemas[logical as keyof TaskMapped]
       switch (logical as keyof TaskMapped) {
         case "campagne": {
-          const decoded = decodeRefValue(raw, schema)
-          warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
-          mapped.campagne = decoded
+          const decodedRaw = decodeGristValue(raw, schema)
+          const id = extractRefId(decodedRaw)
+          warnIfDecodeFailed(logical, real, raw, schema, id, row.id)
+          mapped.campagne = id
+          // The mapped column often turns out not to be an actual Ref/
+          // RefList (e.g. a computed "display" column showing the linked
+          // record's name as plain text) -- keep that text around so the
+          // UI can show *something* instead of a silently-blank reference.
+          mapped.campagneDisplay =
+            id == null && typeof decodedRaw === "string" && decodedRaw
+              ? decodedRaw
+              : null
           break
         }
         case "dateDebut": {
           const decoded = decodeDateValue(raw, schema)
           warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
           mapped.dateDebut = decoded
+          mapped.dateDebutDisplay =
+            decoded == null && !isEmptyRaw(raw) ? String(raw) : null
           break
         }
         case "dateFin": {
           const decoded = decodeDateValue(raw, schema)
           warnIfDecodeFailed(logical, real, raw, schema, decoded, row.id)
           mapped.dateFin = decoded
+          mapped.dateFinDisplay =
+            decoded == null && !isEmptyRaw(raw) ? String(raw) : null
           break
         }
         case "type": {
@@ -290,8 +313,11 @@ export function mapTaskRow(
     statut: mapped.statut ?? null,
     titre: mapped.titre ?? "",
     campagne: mapped.campagne ?? null,
+    campagneDisplay: mapped.campagneDisplay ?? null,
     dateDebut: mapped.dateDebut ?? null,
+    dateDebutDisplay: mapped.dateDebutDisplay ?? null,
     dateFin: mapped.dateFin ?? null,
+    dateFinDisplay: mapped.dateFinDisplay ?? null,
     service: mapped.service ?? "",
     type: mapped.type ?? [],
     commentaires: mapped.commentaires ?? "",

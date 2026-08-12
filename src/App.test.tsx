@@ -127,6 +127,43 @@ const MAPPINGS = {
   gerePar: "GERE_PAR",
 }
 
+// Reproduces the live bug report: "Campagne" mapped to "Campagne_Nom", a
+// formula column (type "Any") that returns the linked record's name as
+// plain text -- not an actual Ref/RefList column.
+function misconfiguredCampagneFixture(): GristReplicaDocument {
+  return {
+    generatedAt: "1970-01-01T00:00:00.000Z",
+    docName: "Suivi campagnes",
+    mode: "schema+data",
+    tables: {
+      Tasks: {
+        label: "Tasks",
+        columns: {
+          STATUT: {
+            type: "Choice",
+            label: "Statut",
+            widgetOptions: { choices: ["A faire"] },
+          },
+          TITRE: { type: "Text", label: "Titre" },
+          CAMPAGNE_NOM: {
+            type: "Any",
+            isFormula: true,
+            label: "Campagne_Nom",
+          },
+        },
+        rows: [
+          {
+            id: 1,
+            STATUT: "A faire",
+            TITRE: "Réalisation de vidéos courtes",
+            CAMPAGNE_NOM: "France Botswana Forward",
+          },
+        ],
+      },
+    },
+  }
+}
+
 function Wrapped() {
   return (
     <GristWidgetProvider options={GRIST_OPTIONS}>
@@ -298,6 +335,48 @@ describe("App", () => {
     )
   })
 
+  it("shows a read-only notice for Campagne when it's mapped to a computed column, and never writes to it", async () => {
+    const { emulator } = renderWithGrist(<Wrapped />, {
+      emulator: { document: misconfiguredCampagneFixture() },
+    })
+    emulator.setColumnMappings({
+      statut: "STATUT",
+      titre: "TITRE",
+      campagne: "CAMPAGNE_NOM",
+    })
+
+    await waitFor(() => screen.getByText("Réalisation de vidéos courtes"))
+    fireEvent.click(screen.getByText("Réalisation de vidéos courtes"))
+
+    // Read-only: the raw text is shown (also on the card behind the panel,
+    // hence scoping to the dialog), but there's no interactive select.
+    const dialog = await screen.findByRole("dialog")
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText("France Botswana Forward")
+      ).toBeInTheDocument()
+    )
+    expect(screen.queryByLabelText("Campagne")).not.toBeInTheDocument()
+    expect(
+      within(dialog).getByText(/n'est pas une référence modifiable/)
+    ).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText("Titre"), {
+      target: { value: "Réalisation de vidéos courtes (v2)" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Valider/ }))
+    })
+
+    await waitFor(() => {
+      const [, , , fields] = actionsOf(emulator).find(
+        (a) => a[0] === "UpdateRecord" && a[2] === 1
+      ) as [string, string, number, Record<string, unknown>]
+      expect(fields.TITRE).toBe("Réalisation de vidéos courtes (v2)")
+      expect(fields).not.toHaveProperty("CAMPAGNE_NOM")
+    })
+  })
+
   it("deletes a task", async () => {
     const { emulator } = renderBoard()
 
@@ -358,6 +437,25 @@ describe("mapTaskRow / encodeTaskPatch", () => {
       { campagne: { type: "RefList:Campagnes" } }
     )
     expect(fields.campagne).toEqual(["L", 7])
+  })
+
+  it("falls back to a display string when Campagne is mapped to a computed column instead of a real reference", () => {
+    // The exact shape found live: "Campagne_Nom" turned out to be a formula
+    // column (type "Any", isFormula: true) returning the linked record's
+    // name as plain text, not the reference itself.
+    const task = mapTaskRow(
+      { id: 1, CAMPAGNE_NOM: "France Botswana Forward" },
+      { campagne: "CAMPAGNE_NOM" },
+      {
+        campagne: {
+          type: "Any",
+          isFormula: true,
+          label: "Campagne_Nom",
+        },
+      }
+    )
+    expect(task.campagne).toBeNull()
+    expect(task.campagneDisplay).toBe("France Botswana Forward")
   })
 
   it("decodes a Date cell even when no column schema is available yet", () => {

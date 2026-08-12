@@ -42,6 +42,7 @@ import {
   encodeTaskPatch,
   findUnmappedColumns,
   getStatutChoices,
+  isDateLikeColumn,
   mapTaskRow,
   refTargetTableId,
   resolveDropTarget,
@@ -125,6 +126,17 @@ function EmptyState({ title, message }: { title: string; message: string }) {
       <p className="max-w-sm text-sm text-muted-foreground">{message}</p>
     </div>
   )
+}
+
+/** The campagne id resolves to a fetched label; otherwise fall back to whatever raw text `mapTaskRow` kept around. */
+function resolveCampagneLabel(
+  task: Task,
+  campagneLabelById: Map<number, string>
+): string | null {
+  if (task.campagne != null) {
+    return campagneLabelById.get(task.campagne) ?? `#${task.campagne}`
+  }
+  return task.campagneDisplay
 }
 
 type ColumnData = { value: string; label: string; tasks: Task[] }
@@ -219,7 +231,7 @@ function TaskCardContent({
       <p className="font-medium text-foreground">
         {task.titre || "(Sans titre)"}
       </p>
-      {campagneLabel || task.service || task.dateFin ? (
+      {campagneLabel || task.service || task.dateFin || task.dateFinDisplay ? (
         <dl className="mt-1.5 flex flex-col gap-0.5 text-xs text-muted-foreground">
           {campagneLabel ? (
             <div className="flex gap-1">
@@ -233,10 +245,12 @@ function TaskCardContent({
               <dd className="truncate">{task.service}</dd>
             </div>
           ) : null}
-          {task.dateFin ? (
+          {task.dateFin || task.dateFinDisplay ? (
             <div className="flex gap-1">
               <dt className="shrink-0">Échéance :</dt>
-              <dd>{formatDate(task.dateFin)}</dd>
+              <dd className="truncate">
+                {task.dateFin ? formatDate(task.dateFin) : task.dateFinDisplay}
+              </dd>
             </div>
           ) : null}
         </dl>
@@ -350,12 +364,7 @@ function KanbanColumn({
               <TaskCard
                 key={task.id}
                 task={task}
-                campagneLabel={
-                  task.campagne != null
-                    ? (campagneLabelById.get(task.campagne) ??
-                      `#${task.campagne}`)
-                    : null
-                }
+                campagneLabel={resolveCampagneLabel(task, campagneLabelById)}
                 onOpen={() => onOpenTask(task)}
               />
             ))
@@ -502,6 +511,34 @@ function AdaptiveMultiField({
   )
 }
 
+/**
+ * Read-only stand-in for a field whose mapped Grist column turned out not to
+ * be usable as declared (e.g. Campagne mapped to a computed display column
+ * instead of an actual reference) -- shows whatever raw text is available
+ * plus an actionable explanation, instead of a silently-blank control.
+ */
+function NonEditableFieldNotice({
+  id,
+  value,
+  message,
+}: {
+  id: string
+  value: string | null
+  message: string
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div
+        id={id}
+        className="flex h-8 items-center rounded-lg border border-dashed border-input px-2.5 text-sm text-muted-foreground"
+      >
+        {value || "—"}
+      </div>
+      <p className="text-xs text-destructive">{message}</p>
+    </div>
+  )
+}
+
 function TaskFormPanel({
   mode,
   task,
@@ -509,8 +546,11 @@ function TaskFormPanel({
   statutChoices,
   typeKind,
   typeChoices,
+  campagneKind,
   campagneOptions,
   campagneLoading,
+  dateDebutIsDate,
+  dateFinIsDate,
   gereParKind,
   gereParChoices,
   gereParOptions,
@@ -524,8 +564,11 @@ function TaskFormPanel({
   statutChoices: GristChoiceListEntry[]
   typeKind: FieldKind
   typeChoices: GristChoiceListEntry[]
+  campagneKind: FieldKind
   campagneOptions: RefRecordOption[]
   campagneLoading: boolean
+  dateDebutIsDate: boolean
+  dateFinIsDate: boolean
   gereParKind: FieldKind
   gereParChoices: GristChoiceListEntry[]
   gereParOptions: RefRecordOption[]
@@ -533,6 +576,14 @@ function TaskFormPanel({
   onSave: (patch: Partial<TaskMapped>) => Promise<void>
   onDelete?: () => Promise<void>
 }) {
+  // "unknown" (schema not loaded yet) gets the benefit of the doubt so the
+  // select doesn't flash to the read-only fallback and back during the
+  // normal loading window -- only a *confirmed* wrong type (text/choice/
+  // choicelist) falls back to the read-only notice.
+  const campagneIsRef =
+    campagneKind !== "text" &&
+    campagneKind !== "choice" &&
+    campagneKind !== "choicelist"
   const [draft, setDraft] = useState<Draft>(() =>
     draftFromTask(task, defaultStatut)
   )
@@ -547,10 +598,18 @@ function TaskFormPanel({
     setSaving(true)
     try {
       await onSave({
-        campagne: draft.campagne,
+        // Only send Campagne back when the mapped column is an actual
+        // Ref/RefList -- otherwise it's a computed/display column (see the
+        // read-only fallback below) and Grist would reject or ignore a
+        // write to it anyway.
+        ...(campagneIsRef ? { campagne: draft.campagne } : {}),
         titre: draft.titre,
-        dateDebut: fromDateInputValue(draft.dateDebut),
-        dateFin: fromDateInputValue(draft.dateFin),
+        ...(dateDebutIsDate
+          ? { dateDebut: fromDateInputValue(draft.dateDebut) }
+          : {}),
+        ...(dateFinIsDate
+          ? { dateFin: fromDateInputValue(draft.dateFin) }
+          : {}),
         service: draft.service,
         type: draft.type,
         commentaires: draft.commentaires,
@@ -586,27 +645,35 @@ function TaskFormPanel({
           {/* Ligne 1 : Campagne (référence) */}
           <div className="col-span-2 flex flex-col gap-1.5">
             <Label htmlFor="task-campagne">Campagne</Label>
-            <Select
-              id="task-campagne"
-              value={draft.campagne != null ? String(draft.campagne) : ""}
-              onChange={(e) =>
-                setDraft((d) => ({
-                  ...d,
-                  campagne: e.target.value ? Number(e.target.value) : null,
-                }))
-              }
-            >
-              <option value="">—</option>
-              {withSelectedFallback(
-                campagneOptions,
-                draft.campagne,
-                campagneLoading
-              ).map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.label}
-                </option>
-              ))}
-            </Select>
+            {campagneIsRef ? (
+              <Select
+                id="task-campagne"
+                value={draft.campagne != null ? String(draft.campagne) : ""}
+                onChange={(e) =>
+                  setDraft((d) => ({
+                    ...d,
+                    campagne: e.target.value ? Number(e.target.value) : null,
+                  }))
+                }
+              >
+                <option value="">—</option>
+                {withSelectedFallback(
+                  campagneOptions,
+                  draft.campagne,
+                  campagneLoading
+                ).map((opt) => (
+                  <option key={opt.id} value={opt.id}>
+                    {opt.label}
+                  </option>
+                ))}
+              </Select>
+            ) : (
+              <NonEditableFieldNotice
+                id="task-campagne"
+                value={task?.campagneDisplay ?? null}
+                message="La colonne associée à «Campagne» n'est pas une référence modifiable (elle est calculée). Dans la configuration du widget Grist, associe ce champ à la véritable colonne de référence pour pouvoir la modifier ici."
+              />
+            )}
           </div>
 
           {/* Ligne 2 : Titre */}
@@ -625,25 +692,41 @@ function TaskFormPanel({
           {/* Ligne 3 : Date début + Date fin */}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="task-date-debut">Date début</Label>
-            <Input
-              id="task-date-debut"
-              type="date"
-              value={draft.dateDebut}
-              onChange={(e) =>
-                setDraft((d) => ({ ...d, dateDebut: e.target.value }))
-              }
-            />
+            {dateDebutIsDate ? (
+              <Input
+                id="task-date-debut"
+                type="date"
+                value={draft.dateDebut}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, dateDebut: e.target.value }))
+                }
+              />
+            ) : (
+              <NonEditableFieldNotice
+                id="task-date-debut"
+                value={task?.dateDebutDisplay ?? null}
+                message="La colonne associée à «Date début» n'est pas une date modifiable (elle est calculée). Associe ce champ à la véritable colonne de date dans la configuration du widget Grist."
+              />
+            )}
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="task-date-fin">Date fin</Label>
-            <Input
-              id="task-date-fin"
-              type="date"
-              value={draft.dateFin}
-              onChange={(e) =>
-                setDraft((d) => ({ ...d, dateFin: e.target.value }))
-              }
-            />
+            {dateFinIsDate ? (
+              <Input
+                id="task-date-fin"
+                type="date"
+                value={draft.dateFin}
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, dateFin: e.target.value }))
+                }
+              />
+            ) : (
+              <NonEditableFieldNotice
+                id="task-date-fin"
+                value={task?.dateFinDisplay ?? null}
+                message="La colonne associée à «Date fin» n'est pas une date modifiable (elle est calculée). Associe ce champ à la véritable colonne de date dans la configuration du widget Grist."
+              />
+            )}
           </div>
 
           {/* Ligne 4 : Service responsable + Géré par l'équipe */}
@@ -824,6 +907,10 @@ function KanbanBoard({
     [statutChoices, filteredTasks]
   )
 
+  const campagneKind = useMemo(
+    () => resolveFieldKind(schemas.campagne),
+    [schemas.campagne]
+  )
   const campagneTableId = useMemo(
     () => refTargetTableId(schemas.campagne),
     [schemas.campagne]
@@ -833,6 +920,15 @@ function KanbanBoard({
   const campagneLabelById = useMemo(
     () => new Map(campagneOptions.map((o) => [o.id, o.label])),
     [campagneOptions]
+  )
+
+  const dateDebutIsDate = useMemo(
+    () => isDateLikeColumn(schemas.dateDebut),
+    [schemas.dateDebut]
+  )
+  const dateFinIsDate = useMemo(
+    () => isDateLikeColumn(schemas.dateFin),
+    [schemas.dateFin]
   )
 
   const gereParTableId = useMemo(
@@ -994,12 +1090,10 @@ function KanbanBoard({
           {activeTask ? (
             <TaskCardOverlay
               task={activeTask}
-              campagneLabel={
-                activeTask.campagne != null
-                  ? (campagneLabelById.get(activeTask.campagne) ??
-                    `#${activeTask.campagne}`)
-                  : null
-              }
+              campagneLabel={resolveCampagneLabel(
+                activeTask,
+                campagneLabelById
+              )}
             />
           ) : null}
         </DragOverlay>
@@ -1018,8 +1112,11 @@ function KanbanBoard({
             statutChoices={statutChoices}
             typeKind={typeKind}
             typeChoices={typeChoices}
+            campagneKind={campagneKind}
             campagneOptions={campagneOptions}
             campagneLoading={campagneLoading}
+            dateDebutIsDate={dateDebutIsDate}
+            dateFinIsDate={dateFinIsDate}
             gereParKind={gereParKind}
             gereParChoices={gereParChoices}
             gereParOptions={gereParOptions}
