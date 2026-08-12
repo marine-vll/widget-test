@@ -5,6 +5,7 @@ import {
   useGristSdkAlertDescriptors,
   useGristOptional,
   type GetGristSdkAlertDescriptorsOptions,
+  type GristSdkAlertKind,
   type GristSdkAlertSeverity,
   type UseGristResult,
 } from "grist-widget-sdk"
@@ -15,6 +16,14 @@ import { cn } from "@/lib/utils"
 export type GristSdkAlertsProps = {
   /** Defaults to the nearest `GristWidgetProvider`. */
   widget?: UseGristResult
+  /**
+   * Alert kinds to omit entirely -- e.g. `["section-not-linked"]` for a
+   * widget that intentionally shows its whole table rather than expecting a
+   * selector link, so that alert would otherwise be permanently on. Every
+   * other alert kind (connection/action errors, mapping issues, etc.) still
+   * renders as usual. Forwarded straight to `getGristSdkAlertDescriptors`.
+   */
+  suppressKinds?: readonly GristSdkAlertKind[]
   children: ReactNode
   className?: string
 }
@@ -24,7 +33,9 @@ const GRIST_ALERT_OPTIONS: GetGristSdkAlertDescriptorsOptions = {
     "In Grist, select this widget section on the page, then use Link to connect a table, card, or chart view as the selector.",
 }
 
-function alertSeverityClass(severity: GristSdkAlertSeverity): string | undefined {
+function alertSeverityClass(
+  severity: GristSdkAlertSeverity
+): string | undefined {
   switch (severity) {
     case "warning":
       return "border-amber-500/40 bg-amber-500/10 text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100"
@@ -39,7 +50,12 @@ function alertSeverityClass(severity: GristSdkAlertSeverity): string | undefined
  * Maps {@link getGristSdkAlertDescriptors} from `grist-widget-sdk` to
  * shadcn {@link Alert} (styling follows this app’s `components.json`).
  */
-export function GristSdkAlerts({ widget, children, className }: GristSdkAlertsProps) {
+export function GristSdkAlerts({
+  widget,
+  suppressKinds,
+  children,
+  className,
+}: GristSdkAlertsProps) {
   const fromContext = useGristOptional()
   const w = widget ?? fromContext
 
@@ -49,7 +65,10 @@ export function GristSdkAlerts({ widget, children, className }: GristSdkAlertsPr
     )
   }
 
-  const alertOptions = useMemo(() => GRIST_ALERT_OPTIONS, [])
+  const alertOptions = useMemo<GetGristSdkAlertDescriptorsOptions>(
+    () => ({ ...GRIST_ALERT_OPTIONS, suppressKinds }),
+    [suppressKinds]
+  )
   const alerts = useGristSdkAlertDescriptors(w, alertOptions)
 
   if (alerts.length === 0) {

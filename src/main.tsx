@@ -39,7 +39,12 @@ createRoot(document.getElementById("root")!).render(
             gate={GRIST_OPTIONS.columns?.length ? "canRender" : "ready"}
           >
             <div className="min-h-full w-full bg-background text-foreground">
-              <GristSdkAlerts>
+              {/* This Kanban always shows its whole table by design -- it
+                  never expects an incoming selector link -- so the SDK's
+                  "section not linked" alert would otherwise sit there
+                  permanently. Every other alert (connection/action errors,
+                  mapping issues, etc.) stays on. */}
+              <GristSdkAlerts suppressKinds={["section-not-linked"]}>
                 <App />
               </GristSdkAlerts>
             </div>
