@@ -610,6 +610,45 @@ export function findUnmappedColumns(
   return gaps
 }
 
+export type ColumnMappingCollision = {
+  realColumnId: string
+  fields: ColumnMappingGap[]
+}
+
+/**
+ * Real columns claimed by more than one logical field at once. This fails
+ * *invisibly*: reads are fine either way (a real column showing up under two
+ * logical names is no problem there), but Grist's own reverse mapping
+ * (`mapColumnNamesBack`, what `mapBack()` defers to once actually embedded)
+ * can't tell which logical name a shared real column should resolve back to
+ * -- writes for every field claiming that column silently drop out of the
+ * AddRecord/UpdateRecord action, with no exception and no error surfacing
+ * anywhere in the widget or in Grist. Confirmed live: mapping "Filtre par
+ * campagne" onto the same real column as the editable "Campagne" field made
+ * Campagne stop saving entirely, with the Kanban cards still reading and
+ * displaying it correctly the whole time.
+ */
+export function findColumnMappingCollisions(
+  mappings: GristWidgetColumnMap | null,
+  columnsSpec: GristColumnsToMap | undefined
+): ColumnMappingCollision[] {
+  if (!mappings || !columnsSpec) return []
+  const byRealId = new Map<string, ColumnMappingGap[]>()
+  for (const col of columnsSpec) {
+    if (typeof col === "string") continue
+    const real = mappings[col.name]
+    if (typeof real !== "string" || !real) continue
+    const fields = byRealId.get(real) ?? []
+    fields.push({ name: col.name, title: col.title ?? col.name })
+    byRealId.set(real, fields)
+  }
+  const collisions: ColumnMappingCollision[] = []
+  for (const [realColumnId, fields] of byRealId) {
+    if (fields.length > 1) collisions.push({ realColumnId, fields })
+  }
+  return collisions
+}
+
 /**
  * Distinct, non-empty values across a set of multi-value fields (e.g. every
  * task's `filtreEquipe`, or every task's `campagne`) — used both for filter

@@ -25,6 +25,7 @@ import {
 
 import {
   encodeTaskPatch,
+  findColumnMappingCollisions,
   findUnmappedColumns,
   mapTaskRow,
   resolveDropTarget,
@@ -265,6 +266,27 @@ describe("App", () => {
     expect(notice).toHaveTextContent("Campagne")
     expect(notice).toHaveTextContent("Créé par")
     expect(notice).toHaveTextContent("Filtre par équipe")
+    expect(notice).toHaveTextContent("Filtre par campagne")
+  })
+
+  it("warns when two logical fields are mapped onto the same real column, instead of failing to save silently", async () => {
+    // Reproduces the live bug report: "Filtre par campagne" mapped onto the
+    // same real column as the editable "Campagne" field made Grist's own
+    // reverse mapping drop Campagne from every write, with no error
+    // anywhere -- the widget's read side stayed completely unaffected the
+    // whole time, which is what made it so easy to miss without this check.
+    renderWithGrist(<Wrapped />, {
+      emulator: { document: kanbanFixture() },
+    }).emulator.setColumnMappings({
+      ...MAPPINGS,
+      filtreCampagne: MAPPINGS.campagne,
+    })
+
+    await waitFor(() => screen.getByText("Préparer le kickoff"))
+    const notice = screen
+      .getByText(/pointent vers la même colonne/)
+      .closest("p")!
+    expect(notice).toHaveTextContent("Campagne")
     expect(notice).toHaveTextContent("Filtre par campagne")
   })
 
@@ -633,6 +655,47 @@ describe("findUnmappedColumns", () => {
   it("returns nothing when every field has a real column", () => {
     const spec = [{ name: "statut", title: "Statut" }]
     expect(findUnmappedColumns({ statut: "STATUT" }, spec)).toEqual([])
+  })
+})
+
+describe("findColumnMappingCollisions", () => {
+  it("flags two logical fields mapped onto the same real column", () => {
+    // Confirmed live: mapping "Filtre par campagne" onto the same real
+    // column as the editable "Campagne" field made Grist's own
+    // mapColumnNamesBack drop Campagne from every write silently -- reads
+    // stayed fine the whole time, which is what makes this so easy to miss
+    // without an explicit check.
+    const spec = [
+      { name: "statut", title: "Statut" },
+      { name: "campagne", title: "Campagne", optional: true },
+      { name: "filtreCampagne", title: "Filtre par campagne", optional: true },
+    ]
+    const collisions = findColumnMappingCollisions(
+      { statut: "STATUT", campagne: "CAMPAGNE", filtreCampagne: "CAMPAGNE" },
+      spec
+    )
+    expect(collisions).toEqual([
+      {
+        realColumnId: "CAMPAGNE",
+        fields: [
+          { name: "campagne", title: "Campagne" },
+          { name: "filtreCampagne", title: "Filtre par campagne" },
+        ],
+      },
+    ])
+  })
+
+  it("returns nothing when every logical field has its own real column", () => {
+    const spec = [
+      { name: "statut", title: "Statut" },
+      { name: "campagne", title: "Campagne", optional: true },
+    ]
+    expect(
+      findColumnMappingCollisions(
+        { statut: "STATUT", campagne: "CAMPAGNE" },
+        spec
+      )
+    ).toEqual([])
   })
 })
 

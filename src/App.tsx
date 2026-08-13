@@ -40,6 +40,7 @@ import {
   buildColumnSchemas,
   distinctValues,
   encodeTaskPatch,
+  findColumnMappingCollisions,
   findUnmappedColumns,
   getStatutChoices,
   isDateLikeColumn,
@@ -52,6 +53,7 @@ import {
   UNASSIGNED_STATUS,
   useRefRecordOptions,
   withSelectedFallback,
+  type ColumnMappingCollision,
   type ColumnMappingGap,
   type FieldKind,
   type RefRecordOption,
@@ -1011,10 +1013,12 @@ function KanbanBoard({
   w,
   schemas,
   unmappedColumns,
+  columnCollisions,
 }: {
   w: Grist
   schemas: TaskColumnSchemas
   unmappedColumns: ColumnMappingGap[]
+  columnCollisions: ColumnMappingCollision[]
 }) {
   const [panel, setPanel] = useState<PanelState | null>(null)
   const [activeTask, setActiveTask] = useState<Task | null>(null)
@@ -1193,6 +1197,22 @@ function KanbanBoard({
         <span aria-hidden="true" />
       </header>
 
+      {columnCollisions.length > 0 ? (
+        <p
+          role="alert"
+          className="border-b border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-100"
+        >
+          Plusieurs champs de la configuration du widget (icône ⚙ du panneau
+          Grist) pointent vers la même colonne réelle :{" "}
+          {columnCollisions
+            .map((c) => c.fields.map((f) => f.title).join(" / "))
+            .join(", ")}
+          . Grist ne peut alors plus savoir lequel de ces champs enregistrer en
+          écriture — aucun d'eux ne sera sauvegardé, sans aucun message
+          d'erreur. Associe chacun à une colonne réelle différente.
+        </p>
+      ) : null}
+
       {unmappedColumns.length > 0 ? (
         <p
           role="status"
@@ -1337,6 +1357,11 @@ export function App() {
     [w.recordsMappings]
   )
 
+  const columnCollisions = useMemo(
+    () => findColumnMappingCollisions(w.recordsMappings, GRIST_OPTIONS.columns),
+    [w.recordsMappings]
+  )
+
   if (w.columnMappingStatus.pending) {
     return (
       <EmptyState
@@ -1356,7 +1381,12 @@ export function App() {
   }
 
   return (
-    <KanbanBoard w={w} schemas={schemas} unmappedColumns={unmappedColumns} />
+    <KanbanBoard
+      w={w}
+      schemas={schemas}
+      unmappedColumns={unmappedColumns}
+      columnCollisions={columnCollisions}
+    />
   )
 }
 
